@@ -56,7 +56,7 @@ var FICHAS = (function () {
       linhaTabela('PONTUAÇÃO DA TURMA (SOMATÓRIA DAS MÉDIAS DIVIDIDO POR DOIS)', notaBr(b.pont), true);
       y += 6;
     });
-    novaPagina(22);
+    novaPagina(40);                                     // deixa folga no rodapé da última página para o carimbo da assinatura digital
     linhaTabela('MÉDIA DA PONTUAÇÃO DAS TURMAS CONSOLIDADO – RESULTADO FINAL', notaBr(d.final), true);
     y += 8;
     doc.setFont('helvetica', 'bold'); doc.setFontSize(10);
