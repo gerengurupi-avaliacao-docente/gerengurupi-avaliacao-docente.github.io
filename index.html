@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2f9e41">
+<meta name="robots" content="noindex">
+<title>Avaliação Docente</title>
+<link rel="icon" href="icone.svg">
+<link rel="stylesheet" href="comum.css">
+</head>
+<body>
+<header class="topo">
+  <h1 id="titulo">Avaliação Docente</h1>
+  <p>Sua opinião é anônima e ajuda a melhorar as aulas.</p>
+</header>
+<main id="app"><div class="carrega">Carregando…</div></main>
+<div class="rodape-site"><a href="gestor.html">Área do gestor</a></div>
+
+<script src="config.js"></script>
+<script src="comum.js"></script>
+<script>
+var CFG = { perguntas: [], aberto: false, pedeNascimento: false };
+var PERGUNTAS = [];
+var E = { matricula:'', conf:'', semestres:[], sem:null, turma:null, notas:[], auto:[], pos:0 };
+var ROTULOS = ['', 'Péssimo', 'Muito ruim', 'Ruim', 'Fraco', 'Regular', 'Razoável', 'Bom', 'Muito bom', 'Ótimo', 'Excelente'];
+var app = document.getElementById('app');
+
+function tela(nos) { app.innerHTML = ''; nos.forEach(function (n) { if (n) app.appendChild(n); }); window.scrollTo(0, 0); }
+function carregando(msg) { tela([h('div', { class:'carrega', text: msg || 'Carregando…' })]); }
+function telaErro(msg, voltar) {
+  tela([h('div', { class:'cartao' }, [h('h2', { text:'Ops…' }), h('p', { text: msg }),
+    h('button', { class:'btn', text:'Tentar de novo', onclick: voltar || function () { location.reload(); } })])]);
+}
+/** Chama o servidor; se cair a internet, mostra o aviso e deixa tentar de novo sem perder o que foi respondido. */
+function servidor(acao, dados, ok, aoFalhar) {
+  api(acao, dados).then(ok).catch(function (e) {
+    telaErro('Não foi possível falar com o servidor. Verifique a internet e tente de novo. (' + (e && e.message || e) + ')', aoFalhar);
+  });
+}
+
+/* ---------- 0. início ---------- */
+function iniciarSite() {
+  carregando();
+  servidor('inicio', {}, function (r) {
+    if (r.erro) { telaErro(r.erro); return; }
+    CFG = r; PERGUNTAS = r.perguntas;
+    document.getElementById('titulo').textContent = r.titulo;
+    document.title = r.titulo;
+    telaLogin();
+  });
+}
+
+/* ---------- 1. matrícula ---------- */
+function telaLogin(msgErro) {
+  if (!CFG.aberto) {
+    tela([h('div', { class:'cartao' }, [h('h2', { text:'Avaliação fechada' }),
+      h('p', { text:'No momento não há avaliação aberta. Aguarde o aviso da Gerência de Ensino.' })])]);
+    return;
+  }
+  var inp = h('input', { type:'text', class:'grande', autocomplete:'off', autocapitalize:'characters', spellcheck:'false', placeholder:'Sua matrícula', maxlength:'30', value: E.matricula });
+  // a data de nascimento só é pedida se a lista de alunos enviada pelo gestor tiver essa coluna
+  var nasc = CFG.pedeNascimento ? h('input', { type:'text', class:'grande', inputmode:'numeric', autocomplete:'off', placeholder:'dd/mm/aaaa', maxlength:'10' }) : null;
+  if (nasc) nasc.oninput = function () {
+    var d = nasc.value.replace(/\D/g, '').slice(0, 8);
+    nasc.value = d.length > 4 ? d.slice(0, 2) + '/' + d.slice(2, 4) + '/' + d.slice(4) : d.length > 2 ? d.slice(0, 2) + '/' + d.slice(2) : d;
+  };
+  var entrar = function () {
+    var m = inp.value.toUpperCase().replace(/[^A-Z0-9]/g, ''), c = nasc ? nasc.value.replace(/\D/g, '') : '';
+    E.matricula = m;
+    if (m.length < 6) { telaLogin('Digite sua matrícula completa.'); return; }
+    if (nasc && c.length !== 8) { telaLogin('Digite sua data de nascimento completa: dia, mês e ano.'); return; }
+    E.conf = c; carregando('Procurando sua turma…');
+    servidor('entrar', { matricula: m, conf: c }, function (r) {
+      if (r.erro) { telaLogin(r.erro); return; }
+      E.semestres = r.semestres; telaSemestres();
+    }, telaLogin);
+  };
+  inp.onkeydown = function (ev) { if (ev.key === 'Enter') { if (nasc && !nasc.value) nasc.focus(); else entrar(); } };
+  if (nasc) nasc.onkeydown = function (ev) { if (ev.key === 'Enter') entrar(); };
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Avaliação dos docentes pelos estudantes' }),
+    h('p', { text:'Digite sua matrícula' + (nasc ? ' e sua data de nascimento' : '') + ' para abrir a avaliação do seu curso.' }),
+    nasc ? h('label', { text:'Matrícula' }) : null,
+    inp,
+    nasc ? h('label', { text:'Data de nascimento' }) : null,
+    nasc,
+    typeof msgErro === 'string' ? h('div', { class:'erro', text: msgErro }) : null,
+    h('button', { class:'btn', text:'Entrar', onclick: entrar }),
+    h('p', { class:'sub', style:'margin-top:14px', text:'A matrícula serve só para abrir a sua turma e garantir uma avaliação por estudante em cada semestre. Suas notas são gravadas sem nome e sem matrícula.' })
+  ])]);
+  inp.focus();
+}
+
+/* ---------- 2. semestre letivo ---------- */
+function telaSemestres() {
+  var pend = E.semestres.filter(function (s) { return !s.feita; }).length;
+  var itens = E.semestres.map(function (s) {
+    if (s.feita) return h('div', { class:'opcao feita' }, [h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text:'✔ Avaliação já enviada. Obrigado!' })])]);
+    return h('button', { class:'opcao', onclick: function () { E.sem = s; telaTurmas(); } }, [
+      h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text:'Avaliação pendente — toque para responder' })]),
+      h('span', { class:'seta', text:'›' })]);
+  });
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Semestre letivo' }),
+    h('p', { class:'sub', text: pend ? 'Cada semestre é uma avaliação separada. Escolha qual vai responder agora.' : 'Você já respondeu todas as avaliações abertas.' })
+  ].concat(itens)),
+  h('button', { class:'btn sec', text:'Sair', onclick: sair })]);
+}
+function sair() { avisarAoSair(false); E.matricula = ''; E.conf = ''; E.semestres = []; E.turma = null; E.notas = []; telaLogin(); }
+
+/* ---------- 3. turma ---------- */
+function telaTurmas() {
+  var ts = E.sem.turmas, sug = ts.filter(function (t) { return t.sugerida; });
+  var botoes = ts.map(function (t) {
+    return h('button', { class:'opcao', onclick: function () { iniciar(t); } }, [
+      h('div', {}, [h('div', { class:'tit' }, [t.nome, t.sugerida && sug.length === 1 ? h('span', { class:'selo', text:'provável' }) : null]),
+                    h('div', { class:'det', text: t.itens.length + ' docente(s)/disciplina(s) para avaliar' })]),
+      h('span', { class:'seta', text:'›' })]);
+  });
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Qual é a sua turma?' }),
+    h('p', { class:'sub', text: nomeSem(E.sem.semestre) + '. Atenção: só é possível avaliar uma turma por semestre — escolha a sua turma de verdade.' })
+  ].concat(botoes)),
+  h('button', { class:'btn sec', text:'Voltar', onclick: telaSemestres })]);
+}
+
+function iniciar(t) {
+  E.pos = 0;
+  if (E.turma !== t) {      // voltou e escolheu a mesma turma: mantém o que já tinha respondido
+    E.turma = t;
+    // notas[docente][pergunta]: undefined = sem resposta, null = não se aplica
+    E.notas = t.itens.map(function () { return PERGUNTAS.map(function () { return undefined; }); });
+    // auto[docente][pergunta] = true quando o "não se aplica" foi preenchido sozinho (não pelo toque do aluno)
+    E.auto = t.itens.map(function () { return PERGUNTAS.map(function () { return false; }); });
+  }
+  avisarAoSair(true);
+  telaPergunta();
+}
+
+/* pede confirmação se o aluno tentar fechar ou recarregar a página no meio da avaliação */
+function avisarAoSair(ligar) {
+  window.onbeforeunload = ligar ? function (ev) { ev.preventDefault(); ev.returnValue = ''; return ''; } : null;
+}
+
+/* ---------- 4. uma pergunta por tela, todos os docentes da turma ---------- */
+function telaPergunta() {
+  var q = E.pos, p = PERGUNTAS[q], ultimo = q === PERGUNTAS.length - 1;
+  var aviso = h('div', { class:'falta-msg' });
+  var prox = h('button', { class:'btn', text: ultimo ? 'Revisar e enviar' : 'Próxima pergunta' });
+  var faltam = function () { return E.notas.filter(function (n) { return n[q] === undefined; }).length; };
+  var atualizar = function () {
+    var f = faltam();
+    prox.disabled = f > 0;
+    aviso.textContent = f ? 'Falta' + (f > 1 ? 'm ' : ' ') + f + ' docente' + (f > 1 ? 's' : '') + ' nesta pergunta (marcados com •)' : '';
+  };
+  prox.onclick = function () { if (ultimo) telaEnvio(); else { E.pos++; telaPergunta(); } };
+
+  var linhas = E.turma.itens.map(function (it, i) {
+    var escala = h('div', { class:'escala' }), valor = h('span', { class:'valor' });
+    var na = h('button', { class:'na', text:'Não se aplica' });
+    var linha = h('div', { class:'doc' });
+    var pintar = function () {
+      var v = E.notas[i][q];
+      Array.prototype.forEach.call(escala.children, function (b, k) {
+        var n = k + 1, cheio = typeof v === 'number' && n <= v;
+        b.className = (cheio ? 'cheio' : '') + (n === v ? ' topo' : '');
+        b.style.background = cheio ? cor(v) : '';
+      });
+      na.className = 'na' + (v === null ? ' on' : '');
+      valor.textContent = typeof v === 'number' ? v + ' – ' + ROTULOS[v] : '';
+      valor.style.color = typeof v === 'number' ? cor(v) : '';
+      linha.className = 'doc' + (v === undefined ? ' falta' : '');
+      atualizar();
+    };
+    for (var n = 1; n <= 10; n++) (function (n) {
+      escala.appendChild(h('button', { text: String(n), 'aria-label': 'Nota ' + n + ' para ' + it.docente, onclick: function () {
+        E.notas[i][q] = n; E.auto[i][q] = false;
+        // se antes tinha marcado "não se aplica" por engano, desfaz o que foi preenchido sozinho nas perguntas seguintes
+        for (var k = q + 1; k < PERGUNTAS.length; k++) if (E.auto[i][k]) { E.notas[i][k] = undefined; E.auto[i][k] = false; }
+        pintar();
+      } }));
+    })(n);
+    na.onclick = function () {
+      E.notas[i][q] = null; E.auto[i][q] = false;
+      // quem não tem aula com o docente: já deixa "não se aplica" nas perguntas seguintes (dá para mudar)
+      for (var k = q + 1; k < PERGUNTAS.length; k++) if (E.notas[i][k] === undefined) { E.notas[i][k] = null; E.auto[i][k] = true; }
+      pintar();
+    };
+    linha.appendChild(h('div', { class:'quem' }, [h('div', { class:'nome', text: it.docente }), h('div', { class:'disc', text: it.disc })]));
+    linha.appendChild(h('div', { class:'nota' }, [escala, h('div', { class:'rodape-nota' }, [valor, na])]));
+    pintar();
+    return linha;
+  });
+
+  var passos = h('div', { class:'passos' }, PERGUNTAS.map(function (_, k) { return h('i', { class: k < q ? 'feito' : k === q ? 'atual' : '' }); }));
+  tela([
+    h('div', { class:'sub', text: E.turma.nome + ' · ' + nomeSem(E.sem.semestre) }),
+    passos,
+    h('div', { class:'cartao pergunta' }, [
+      h('span', { class:'num', text:'Pergunta ' + (q + 1) + ' de ' + PERGUNTAS.length }),
+      h('p', { class:'txt', text: p.t }),
+      h('p', { class:'sub', style:'margin:6px 0 4px', text:'Dê uma nota de 1 (péssimo) a 10 (excelente) para cada docente. Se você não tem aula com ele, toque em "Não se aplica".' })
+    ].concat(linhas)),
+    aviso,
+    h('div', { class:'linha2' }, [
+      h('button', { class:'btn sec', text:'Voltar', onclick: function () { if (q === 0) telaTurmas(); else { E.pos--; telaPergunta(); } } }), prox])
+  ]);
+  atualizar();
+}
+
+/* ---------- 5. revisão e envio ---------- */
+function telaEnvio(msgErro) {
+  var linhas = E.turma.itens.map(function (it, i) {
+    var v = E.notas[i].filter(function (x) { return typeof x === 'number'; });
+    var m = v.length ? v.reduce(function (a, b) { return a + b; }, 0) / v.length : null;
+    var media = h('div', { class:'m', text: m === null ? 'não se aplica' : notaBr(m) });
+    if (m !== null) media.style.color = cor(Math.round(m));
+    return h('div', { class:'resumo' }, [h('div', {}, [h('div', { style:'font-weight:700', text: it.docente }), h('div', { class:'sub', text: it.disc })]), media]);
+  });
+  var enviar = h('button', { class:'btn', text:'Enviar avaliação' });
+  enviar.onclick = function () {
+    enviar.disabled = true; carregando('Enviando…');
+    // undefined não atravessa a rede: tudo que não for nota vira null ("não se aplica")
+    var notas = E.notas.map(function (n) { return n.map(function (v) { return typeof v === 'number' ? v : null; }); });
+    servidor('enviar', { matricula: E.matricula, conf: E.conf, semestre: E.sem.semestre, turma: E.turma.nome, notas: notas }, function (r) {
+      if (r.erro) { telaEnvio(r.erro); return; }
+      avisarAoSair(false);
+      E.sem.feita = true; E.turma = null; E.notas = []; telaFim();
+    }, function () { telaEnvio(); });
+  };
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Revise antes de enviar' }),
+    h('p', { class:'sub', text:'Média das suas 6 notas para cada docente. Depois de enviar não dá para alterar.' })
+  ].concat(linhas)),
+  typeof msgErro === 'string' ? h('div', { class:'erro', text: msgErro }) : null,
+  h('div', { class:'linha2' }, [
+    h('button', { class:'btn sec', text:'Voltar e corrigir', onclick: function () { E.pos = PERGUNTAS.length - 1; telaPergunta(); } }), enviar])]);
+}
+
+function telaFim() {
+  var falta = E.semestres.some(function (s) { return !s.feita; });
+  tela([h('div', { class:'cartao ok' }, [
+    h('div', { class:'check', text:'✓' }), h('h2', { text:'Avaliação enviada!' }),
+    h('p', { text:'Obrigado por participar. Suas respostas de ' + nomeSem(E.sem.semestre) + ' foram gravadas de forma anônima.' }),
+    falta ? h('button', { class:'btn', text:'Responder o outro semestre', onclick: telaSemestres }) : null,
+    h('button', { class:'btn sec', text:'Sair', onclick: sair })
+  ])]);
+}
+
+iniciarSite();
+</script>
+</body>
+</html>

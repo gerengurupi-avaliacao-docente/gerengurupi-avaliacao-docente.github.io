@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#2f9e41">
+<meta name="robots" content="noindex">
+<title>Área do gestor – Avaliação Docente</title>
+<link rel="icon" href="icone.svg">
+<link rel="stylesheet" href="comum.css">
+</head>
+<body class="gestor">
+<header class="topo">
+  <h1 id="titulo">Avaliação Docente</h1>
+  <p>Área do gestor</p>
+</header>
+<nav class="abas" id="nav" hidden><div class="dentro" id="abas"></div></nav>
+<main id="app"><div class="carrega">Carregando…</div></main>
+<div class="rodape-site"><a href="./">Página dos alunos</a></div>
+
+<script src="config.js"></script>
+<script src="comum.js"></script>
+<script src="lib/qrcode.js"></script>
+<script>
+/* Área do gestor: tudo que antes era feito nos menus da planilha agora é feito aqui.
+ * O servidor (Codigo.gs) confere a sessão em toda chamada; esta página só mostra e envia. */
+var TOKEN = '';                 // sessão de 8 horas, guardada só nesta aba do navegador
+var P = null;                   // painel: tudo que o servidor devolve de uma vez
+var ABA = 'inicio';
+var EDIT = {};                  // turmas alteradas e ainda não salvas: {cod: {nome, semestres, avaliar}}
+var FILTRO = { texto: '', qual: 'todas' };
+var ARQ = { diarios: null, alunos: null, erros: [] };   // relatórios escolhidos e ainda não enviados
+var RES = null;                 // resultado do semestre escolhido
+var SEM_PART = '';              // semestre escolhido na aba Participação
+var app = document.getElementById('app');
+var ABAS = [['inicio', 'Início'], ['dados', 'Dados do SUAP'], ['turmas', 'Turmas'], ['participacao', 'Participação'],
+            ['resultados', 'Resultados'], ['config', 'Configurações']];
+
+try { TOKEN = sessionStorage.getItem('avaliacao_gestor') || ''; } catch (e) { /* navegador sem armazenamento: só pede a senha de novo */ }
+function guardarToken(t) { TOKEN = t || ''; try { if (TOKEN) sessionStorage.setItem('avaliacao_gestor', TOKEN); else sessionStorage.removeItem('avaliacao_gestor'); } catch (e) {} }
+
+/* ---------- utilidades ---------- */
+function tela(nos) { app.innerHTML = ''; [].concat(nos).forEach(function (n) { if (n) app.appendChild(n); }); }
+function carregando(msg) { tela(h('div', { class:'carrega', text: msg || 'Carregando…' })); }
+
+var avisoAtual = null;
+function aviso(msg, ruim) {
+  if (avisoAtual) avisoAtual.remove();
+  var el = avisoAtual = h('div', { class:'aviso-flutua' + (ruim ? ' ruim' : ''), role:'status', text: msg });
+  document.body.appendChild(el);
+  setTimeout(function () { el.remove(); if (avisoAtual === el) avisoAtual = null; }, ruim ? 9000 : 5000);
+}
+function textoErro(e) {
+  var m = String(e && e.message || e);
+  return /failed to fetch|networkerror|load failed/i.test(m) ? 'Não foi possível falar com o servidor. Verifique a internet e tente de novo.' : m;
+}
+function falha(e) { if (!(e && e.jaAvisado)) aviso(textoErro(e), true); }
+
+/** Chamada com a sessão do gestor. Erros do servidor viram exceção; sessão vencida volta para a tela de senha. */
+function chamar(acao, dados) {
+  return api(acao, Object.assign({ token: TOKEN }, dados || {})).then(function (r) {
+    if (r && r.sair) { guardarToken(''); P = null; telaSenha(false, r.erro); var e = new Error(r.erro); e.jaAvisado = true; throw e; }
+    if (r && r.erro) throw new Error(r.erro);
+    return r;
+  });
+}
+/** Desliga o botão e troca o texto enquanto a chamada não volta. */
+function ocupado(botao, texto, promessa) {
+  var antes = botao.textContent;
+  botao.disabled = true; botao.textContent = texto;
+  var volta = function () { botao.disabled = false; botao.textContent = antes; };
+  return promessa.then(function (r) { volta(); return r; }, function (e) { volta(); throw e; });
+}
+var carregados = {};
+function carregarScript(src) {
+  if (!carregados[src]) carregados[src] = new Promise(function (ok, erro) {
+    var s = h('script', { src: src });
+    s.onload = ok;
+    s.onerror = function () { delete carregados[src]; erro(new Error('Não foi possível carregar ' + src + '. Verifique a internet.')); };
+    document.head.appendChild(s);
+  });
+  return carregados[src];
+}
+function listaSem(txt) { return String(txt || '').split(';').map(function (s) { return s.trim(); }).filter(Boolean); }
+function enderecoAlunos() { return new URL('.', location.href).href; }
+function semestresConhecidos() {
+  var o = {};
+  P.semestresPossiveis.concat(P.semestresComResposta, P.config.semestres).forEach(function (s) { o[s] = true; });
+  return Object.keys(o).sort();
+}
+
+/* ---------- entrada ---------- */
+function iniciar() {
+  carregando();
+  if (TOKEN) { abrirPainel(); return; }
+  api('gestor').then(function (r) {
+    if (r.erro) throw new Error(r.erro);
+    telaSenha(!r.temSenha);
+  }).catch(function (e) {
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Ops…' }), h('p', { text: textoErro(e) }),
+      h('button', { class:'btn', text:'Tentar de novo', onclick: iniciar })]));
+  });
+}
+
+function telaSenha(criar, msgErro) {
+  document.getElementById('nav').hidden = true;
+  var s1 = h('input', { type:'password', autocomplete: criar ? 'new-password' : 'current-password', placeholder:'Senha' });
+  var s2 = criar ? h('input', { type:'password', autocomplete:'new-password', placeholder:'Repita a senha' }) : null;
+  var erro = h('div', { class:'erro', hidden: !msgErro, text: msgErro || '' });
+  var botao = h('button', { class:'btn', text: criar ? 'Criar senha e entrar' : 'Entrar' });
+  var mostra = function (m) { erro.textContent = m; erro.hidden = false; };
+  var entrar = function () {
+    if (criar && s1.value.length < 8) { mostra('A senha precisa ter pelo menos 8 caracteres.'); return; }
+    if (criar && s1.value !== s2.value) { mostra('As duas senhas não são iguais.'); return; }
+    if (!s1.value) { mostra('Digite a senha.'); return; }
+    ocupado(botao, 'Entrando…', api(criar ? 'criarSenha' : 'login', { senha: s1.value })).then(function (r) {
+      if (r.criar) { telaSenha(true); return; }
+      if (r.erro) { mostra(r.erro); return; }
+      guardarToken(r.token); abrirPainel();
+    }).catch(function (e) { mostra(textoErro(e)); });
+  };
+  botao.onclick = entrar;
+  s1.onkeydown = function (ev) { if (ev.key === 'Enter') { if (s2) s2.focus(); else entrar(); } };
+  if (s2) s2.onkeydown = function (ev) { if (ev.key === 'Enter') entrar(); };
+  tela(h('div', { class:'cartao', style:'max-width:440px;margin:24px auto' }, [
+    h('h2', { text: criar ? 'Crie a senha do gestor' : 'Entrar' }),
+    h('p', { class:'sub', text: criar
+      ? 'É o primeiro acesso deste sistema. Escolha uma senha (8 caracteres ou mais): só quem souber a senha abre esta área.'
+      : 'Digite a senha do gestor.' }),
+    h('label', { text:'Senha' }), s1,
+    s2 ? h('label', { text:'Repita a senha' }) : null, s2,
+    erro, botao,
+    criar ? null : h('p', { class:'sub', style:'margin-top:14px', text:'Esqueceu a senha? Abra a planilha do sistema no Google e use o menu Avaliação Docente > Esqueci a senha do gestor.' })
+  ]));
+  s1.focus();
+}
+
+function abrirPainel() {
+  carregando();
+  chamar('painel').then(function (r) { P = r; desenhar(); }).catch(function (e) {
+    if (e && e.jaAvisado) return;
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Ops…' }), h('p', { text: textoErro(e) }),
+      h('button', { class:'btn', text:'Tentar de novo', onclick: abrirPainel })]));
+  });
+}
+
+function sair() {
+  if (Object.keys(EDIT).length && !confirm('Há alterações nas turmas que não foram salvas. Sair assim mesmo?')) return;
+  guardarToken(''); P = null; EDIT = {}; RES = null; ARQ = { diarios: null, alunos: null, erros: [] };
+  iniciar();
+}
+
+/* ---------- moldura: abas ---------- */
+function desenhar() {
+  document.getElementById('titulo').textContent = P.config.titulo;
+  var nav = document.getElementById('abas');
+  nav.innerHTML = '';
+  ABAS.forEach(function (a) {
+    nav.appendChild(h('button', { class: a[0] === ABA ? 'on' : '', text: a[1], onclick: function () { ABA = a[0]; desenhar(); window.scrollTo(0, 0); } }));
+  });
+  nav.appendChild(h('button', { class:'sair', text:'Sair', onclick: sair }));
+  document.getElementById('nav').hidden = false;
+  ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, participacao: abaParticipacao, resultados: abaResultados, config: abaConfig })[ABA]();
+}
+function irPara(aba) { ABA = aba; desenhar(); window.scrollTo(0, 0); }
+window.onbeforeunload = function (ev) { if (Object.keys(EDIT).length) { ev.preventDefault(); ev.returnValue = ''; return ''; } };
+
+/* ====================================================================== 1. INÍCIO */
+function abaInicio() {
+  var c = P.config, avaliadas = P.turmas.filter(function (t) { return t.avaliar; }).length;
+  var semDados = !P.dados.diarios || !P.dados.alunos;
+  var aberta = c.aberto && c.semestres.length > 0;
+  var envios = P.participacao.porCurso.filter(function (x) { return c.semestres.indexOf(x.semestre) >= 0; })
+    .reduce(function (a, x) { return a + x.envios; }, 0);
+
+  // --- estado e semestres
+  var botao = h('button', { class:'btn' + (aberta ? ' perigo' : ''), text: aberta ? 'Fechar a avaliação' : 'Abrir a avaliação' });
+  botao.onclick = function () {
+    if (!aberta) {
+      if (semDados) { aviso('Antes de abrir, envie os relatórios do SUAP (aba Dados do SUAP).', true); return; }
+      if (!c.semestres.length) { aviso('Marque pelo menos um semestre letivo para avaliar.', true); return; }
+    } else if (!confirm('Fechar a avaliação? Os alunos não vão mais conseguir responder (as respostas já enviadas ficam guardadas).')) return;
+    ocupado(botao, 'Salvando…', chamar('salvarConfig', { config: { aberto: !aberta } })).then(function (r) {
+      P = r; desenhar(); aviso(aberta ? 'Avaliação fechada.' : 'Avaliação aberta. O site já está valendo para os alunos.');
+    }).catch(falha);
+  };
+  var caixas = semestresConhecidos().map(function (s) {
+    var cx = h('input', { type:'checkbox', checked: c.semestres.indexOf(s) >= 0 });
+    cx.onchange = function () {
+      var lista = c.semestres.filter(function (x) { return x !== s; });
+      if (cx.checked) lista.push(s);
+      cx.disabled = true;
+      chamar('salvarConfig', { config: { semestres: lista.sort() } }).then(function (r) { P = r; desenhar(); }).catch(function (e) { falha(e); desenhar(); });
+    };
+    return h('label', { class:'caixa' }, [cx, nomeSem(s)]);
+  });
+  var cartaoEstado = h('div', { class:'cartao' }, [
+    h('h2', { text:'Situação' }),
+    h('p', {}, [h('span', { class:'estado ' + (aberta ? 'aberta' : 'fechada'), text: aberta ? 'ABERTA' : 'FECHADA' })]),
+    h('p', { class:'sub', text: aberta ? 'Os alunos conseguem responder agora.' : c.aberto ? 'Está marcada como aberta, mas sem nenhum semestre escolhido: para os alunos aparece fechada.' : 'Os alunos veem o aviso de avaliação fechada.' }),
+    h('h3', { style:'margin-top:14px', text:'Semestres letivos em avaliação' }),
+    caixas.length ? h('div', {}, caixas) : h('p', { class:'sub', text:'Aparecem aqui depois que o relatório de diários for enviado.' }),
+    caixas.length ? h('p', { class:'sub', text:'Cada semestre marcado é uma avaliação separada para o aluno.' }) : null,
+    botao
+  ]);
+
+  // --- números
+  var num = function (n, rotulo) { return h('div', {}, [h('div', { class:'numero', text: String(n) }), h('div', { class:'sub', text: rotulo })]); };
+  var cartaoNumeros = h('div', { class:'cartao' }, [
+    h('h2', { text:'Em números' }),
+    h('div', { class:'trio' }, [num(envios, 'avaliações recebidas'), num(avaliadas, 'turmas em avaliação'), num(P.dados.alunos, 'matrículas na lista')]),
+    h('p', { class:'sub', style:'margin-top:12px', text: P.dados.diarios + ' diários do SUAP. ' +
+      (P.dados.alunos ? (P.dados.pedeNascimento ? 'O site pede matrícula e data de nascimento.' : 'O site pede só a matrícula (a lista de alunos veio sem data de nascimento).') : '') }),
+    h('div', { class:'linha2' }, [
+      h('button', { class:'btn sec', text:'Ver participação', onclick: function () { irPara('participacao'); } }),
+      h('button', { class:'btn sec', text:'Ver resultados', onclick: function () { irPara('resultados'); } })])
+  ]);
+
+  // --- endereço e QR code
+  var url = enderecoAlunos();
+  var campo = h('input', { type:'text', readonly: true, value: url, onfocus: function () { campo.select(); } });
+  var copiar = h('button', { class:'btn peq', text:'Copiar', onclick: function () {
+    var feito = function () { aviso('Endereço copiado.'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(feito, function () { campo.select(); document.execCommand('copy'); feito(); });
+    else { campo.select(); document.execCommand('copy'); feito(); }
+  } });
+  var tela2 = desenharQr(url);
+  var cartaoLink = h('div', { class:'cartao' }, [
+    h('h2', { text:'Endereço para os alunos' }),
+    h('div', { class:'endereco' }, [campo, copiar]),
+    h('div', { class:'qr' }, [tela2 || h('p', { class:'sub', text:'(não foi possível montar o QR code)' })]),
+    tela2 ? h('div', { style:'text-align:center;margin-top:8px' }, [h('button', { class:'btn peq sec', text:'Baixar QR code (imagem)', onclick: function () {
+      tela2.toBlob(function (b) { baixar(b, 'QR code - Avaliação Docente.png'); });
+    } })]) : null
+  ]);
+
+  var guia = semDados ? h('div', { class:'cartao' }, [
+    h('h2', { text:'Primeiros passos' }),
+    h('ol', { class:'passo-a-passo' }, [
+      h('li', { text:'Na aba Dados do SUAP, envie o relatório de diários e o relatório de alunos.' }),
+      h('li', { text:'Na aba Turmas, confira os nomes, os semestres e quais turmas serão avaliadas.' }),
+      h('li', { text:'Volte aqui, marque os semestres e clique em Abrir a avaliação.' }),
+      h('li', { text:'Divulgue o endereço ou o QR code para os alunos.' })]),
+    h('button', { class:'btn', text:'Enviar os relatórios do SUAP', onclick: function () { irPara('dados'); } })
+  ]) : null;
+
+  tela([guia, h('div', { class:'grade' }, [cartaoEstado, cartaoNumeros, cartaoLink])]);
+}
+
+/** QR code do endereço num <canvas> (8 pontos por módulo, com margem branca). */
+function desenharQr(texto) {
+  try {
+    var q = qrcode(0, 'M'); q.addData(texto); q.make();
+    var n = q.getModuleCount(), esc = 8, margem = 4, lado = (n + margem * 2) * esc;
+    var cv = h('canvas', { width: lado, height: lado, 'aria-label':'QR code do endereço da avaliação' }), ctx = cv.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, lado, lado);
+    ctx.fillStyle = '#000';
+    for (var l = 0; l < n; l++) for (var c = 0; c < n; c++) if (q.isDark(l, c)) ctx.fillRect((c + margem) * esc, (l + margem) * esc, esc, esc);
+    return cv;
+  } catch (e) { return null; }
+}
+
+/* ====================================================================== 2. DADOS DO SUAP */
+// Colunas que saem do computador do gestor. O nome dos alunos nunca é enviado.
+var COLS = {
+  diarios: { exige: [['turma'], ['descricao do curso'], ['codigo do curso', 'codigo curso'], ['nivel de ensino'], ['descricao do componente'], ['professores']], extra: [] },
+  alunos:  { exige: [['matricula'], ['codigo curso', 'codigo do curso']],
+             extra: [['descricao do curso'], ['situacao no curso', 'situacao'], ['data de nascimento', 'data nascimento', 'nascimento', 'dt. nascimento']] }
+};
+function acha(cab, nomes) { for (var i = 0; i < nomes.length; i++) { var j = cab.indexOf(nomes[i]); if (j >= 0) return j; } return -1; }
+function dois(n) { return (n < 10 ? '0' : '') + n; }
+function celula(v) {
+  if (v === null || v === undefined) return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    var d = new Date(v.getTime() + 12 * 3600000);      // meio-dia: a data não escorrega por causa do fuso
+    return dois(d.getDate()) + '/' + dois(d.getMonth() + 1) + '/' + d.getFullYear();
+  }
+  return String(v).replace(/\s+/g, ' ').trim();
+}
+/** Lê um relatório, descobre se é o de diários ou o de alunos e separa só as colunas necessárias. */
+function lerRelatorio(arquivo) {
+  return arquivo.arrayBuffer().then(function (buf) {
+    var wb = XLSX.read(buf, { type:'array', cellDates: true });
+    var m = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+    for (var i = 0; i < Math.min(m.length, 15); i++) {          // o cabeçalho pode não estar na primeira linha
+      var cab = m[i].map(semAcento);
+      var tipo = ['diarios', 'alunos'].filter(function (t) { return COLS[t].exige.every(function (n) { return acha(cab, n) >= 0; }); })[0];
+      if (!tipo) continue;
+      var idx = COLS[tipo].exige.concat(COLS[tipo].extra).map(function (n) { return acha(cab, n); }).filter(function (j) { return j >= 0; });
+      var linhas = m.slice(i + 1).map(function (r) { return idx.map(function (j) { return celula(r[j]); }); })
+        .filter(function (r) { return r.some(function (v) { return v !== ''; }); });
+      if (!linhas.length) throw new Error('o arquivo não tem nenhuma linha de dados');
+      return { tipo: tipo, nome: arquivo.name, linhas: linhas.length,
+               nascimento: tipo === 'alunos' && acha(cab, COLS.alunos.extra[2]) >= 0,
+               tabela: { cab: idx.map(function (j) { return celula(m[i][j]); }), linhas: linhas } };
+    }
+    throw new Error('não parece ser um relatório de diários nem de alunos do SUAP (não achei as colunas esperadas)');
+  });
+}
+
+function abaDados() {
+  var entrada = h('input', { type:'file', multiple: true, accept:'.xlsx,.xls,.csv,.ods' });
+  var zona = h('label', { class:'arquivo' }, [entrada,
+    h('div', { style:'font-weight:700;font-size:1.05rem', text:'Clique para escolher os relatórios do SUAP' }),
+    h('div', { class:'sub', text:'ou arraste os arquivos para cá. Pode escolher os dois de uma vez: o sistema descobre qual é qual.' })]);
+  var receber = function (lista) {
+    var arqs = [].slice.call(lista || []);
+    if (!arqs.length) return;
+    ARQ.erros = [];
+    tela(h('div', { class:'carrega', text:'Lendo os arquivos…' }));
+    carregarScript('lib/xlsx.full.min.js').then(function () {
+      return Promise.all(arqs.map(function (a) {
+        return lerRelatorio(a).then(function (r) { ARQ[r.tipo] = r; }, function (e) { ARQ.erros.push(a.name + ': ' + textoErro(e) + '.'); });
+      }));
+    }).then(abaDados, function (e) { falha(e); abaDados(); });
+  };
+  entrada.onchange = function () { receber(entrada.files); };
+  zona.ondragover = function (ev) { ev.preventDefault(); zona.classList.add('sobre'); };
+  zona.ondragleave = function () { zona.classList.remove('sobre'); };
+  zona.ondrop = function (ev) { ev.preventDefault(); zona.classList.remove('sobre'); receber(ev.dataTransfer.files); };
+
+  var itens = [];
+  if (ARQ.diarios) itens.push(h('li', { text:'Diários: ' + ARQ.diarios.nome + ' (' + ARQ.diarios.linhas + ' linhas)' }));
+  if (ARQ.alunos) itens.push(h('li', { text:'Alunos: ' + ARQ.alunos.nome + ' (' + ARQ.alunos.linhas + ' matrículas' +
+    (ARQ.alunos.nascimento ? ', com data de nascimento' : ', sem data de nascimento') + ')' }));
+  ARQ.erros.forEach(function (m) { itens.push(h('li', { class:'ruim', text: m })); });
+
+  var enviar = h('button', { class:'btn', text:'Enviar para o sistema', disabled: !ARQ.diarios && !ARQ.alunos });
+  enviar.onclick = function () {
+    var corpo = {};
+    if (ARQ.diarios) corpo.diarios = ARQ.diarios.tabela;
+    if (ARQ.alunos) corpo.alunos = ARQ.alunos.tabela;
+    if (corpo.diarios && P.dados.diarios && !confirm('O relatório de diários vai substituir o que está no sistema. Os ajustes feitos nas turmas e as respostas já recebidas são mantidos. Continuar?')) return;
+    ocupado(enviar, 'Enviando… (pode levar um minuto)', chamar('importar', corpo)).then(function (r) {
+      P = r; RES = null; EDIT = {}; ARQ = { diarios: null, alunos: null, erros: [] };
+      desenhar(); aviso(r.mensagem || 'Dados recebidos.');
+    }).catch(falha);
+  };
+  var limpar = (ARQ.diarios || ARQ.alunos || ARQ.erros.length) ? h('button', { class:'btn sec', text:'Limpar a escolha', onclick: function () {
+    ARQ = { diarios: null, alunos: null, erros: [] }; abaDados();
+  } }) : null;
+
+  tela([
+    h('div', { class:'cartao' }, [
+      h('h2', { text:'Relatórios do SUAP' }),
+      h('p', { class:'sub', text:'No sistema agora: ' + P.dados.diarios + ' diários e ' + P.dados.alunos + ' matrículas' +
+        (P.dados.alunos ? (P.dados.pedeNascimento ? ' (com data de nascimento).' : ' (sem data de nascimento).') : '.') }),
+      zona,
+      itens.length ? h('ul', { class:'lista-arq' }, itens) : null,
+      h('div', { class:'linha2' }, [limpar, enviar]),
+      h('div', { class:'info' }, ['O nome dos alunos não sai do seu computador: esta página separa só as colunas necessárias antes de enviar.'])
+    ]),
+    h('div', { class:'cartao' }, [
+      h('h2', { text:'Quais relatórios?' }),
+      h('h3', { text:'1. Diários' }),
+      h('p', { class:'sub', text:'Relatório de diários do período, exportado do SUAP em planilha, com as colunas: Turma, Descrição do Curso, Código do Curso, Nível de Ensino, Descrição do Componente e Professores.' }),
+      h('h3', { text:'2. Alunos' }),
+      h('p', { class:'sub', text:'Relatório de alunos com as colunas Matrícula, Código Curso e Situação no Curso. Se incluir a coluna Data de Nascimento, o site passa a pedir a data junto com a matrícula (mais seguro: só a matrícula é fácil de adivinhar).' }),
+      h('p', { class:'sub', text:'A cada semestre basta enviar os relatórios novos. Os ajustes feitos na aba Turmas e as respostas antigas continuam guardados.' })
+    ])
+  ]);
+}
+
+/* ====================================================================== 3. TURMAS */
+function valorTurma(t) { return EDIT[t.cod] || { nome: t.nome, semestres: listaSem(t.semestres), avaliar: t.avaliar }; }
+function mudouTurma(t, v) {
+  var igual = v.nome.trim() === t.nome && v.avaliar === t.avaliar && v.semestres.slice().sort().join(';') === listaSem(t.semestres).sort().join(';');
+  if (igual) delete EDIT[t.cod]; else EDIT[t.cod] = v;
+}
+
+function abaTurmas() {
+  if (!P.turmas.length) {
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Turmas' }), h('p', { text:'Ainda não há turmas. Elas são montadas a partir do relatório de diários do SUAP.' }),
+      h('button', { class:'btn', text:'Enviar os relatórios do SUAP', onclick: function () { irPara('dados'); } })]));
+    return;
+  }
+  var sems = semestresConhecidos();
+  var contador = h('span', { class:'sub' });
+  var salvar = h('button', { class:'btn peq', text:'Salvar alterações' });
+  var descartar = h('button', { class:'btn peq sec', text:'Descartar' });
+  var atualizar = function () {
+    var n = Object.keys(EDIT).length;
+    contador.textContent = n ? n + (n > 1 ? ' turmas alteradas' : ' turma alterada') + ' (ainda não salvo)' : '';
+    salvar.disabled = !n; descartar.hidden = !n;
+  };
+  salvar.onclick = function () {
+    var vazio = Object.keys(EDIT).filter(function (c) { return !EDIT[c].nome.trim(); })[0];
+    if (vazio) { aviso('A turma ' + vazio + ' ficou sem nome no site.', true); return; }
+    var lista = Object.keys(EDIT).map(function (c) { return { cod: c, nome: EDIT[c].nome.trim(), semestres: EDIT[c].semestres.join('; '), avaliar: EDIT[c].avaliar }; });
+    ocupado(salvar, 'Salvando…', chamar('salvarTurmas', { turmas: lista })).then(function (r) {
+      P = r; EDIT = {}; desenhar(); aviso('Turmas salvas. O site dos alunos já está atualizado.');
+    }).catch(falha);
+  };
+  descartar.onclick = function () { if (confirm('Descartar as alterações não salvas?')) { EDIT = {}; abaTurmas(); } };
+
+  var corpo = h('tbody');
+  var pintar = function () {
+    corpo.innerHTML = '';
+    var busca = semAcento(FILTRO.texto), grupos = {}, total = 0;
+    P.turmas.forEach(function (t) {
+      var v = valorTurma(t);
+      if (FILTRO.qual === 'sim' && !v.avaliar) return;
+      if (FILTRO.qual === 'nao' && v.avaliar) return;
+      if (busca && semAcento([t.cod, t.curso, v.nome, t.nivel].join(' ')).indexOf(busca) < 0) return;
+      (grupos[t.curso] = grupos[t.curso] || []).push(t); total++;
+    });
+    Object.keys(grupos).sort(function (a, b) { return a.localeCompare(b, 'pt'); }).forEach(function (curso) {
+      corpo.appendChild(h('tr', { class:'grupo' }, [h('td', { colspan:'4', text: curso })]));
+      grupos[curso].sort(function (a, b) { return a.periodo - b.periodo || a.cod.localeCompare(b.cod); }).forEach(function (t) {
+        var v = valorTurma(t);
+        var nome = h('input', { type:'text', value: v.nome, maxlength:'80', 'aria-label':'Nome no site da turma ' + t.cod });
+        var avaliar = h('input', { type:'checkbox', checked: v.avaliar, 'aria-label':'Avaliar a turma ' + t.cod });
+        var marcas = sems.map(function (s) {
+          var cx = h('input', { type:'checkbox', checked: v.semestres.indexOf(s) >= 0 });
+          cx.dataset.sem = s;
+          return cx;
+        });
+        var ler = function () {
+          mudouTurma(t, { nome: nome.value, avaliar: avaliar.checked,
+            semestres: marcas.filter(function (cx) { return cx.checked; }).map(function (cx) { return cx.dataset.sem; }) });
+          atualizar();
+        };
+        nome.oninput = ler; avaliar.onchange = ler; marcas.forEach(function (cx) { cx.onchange = ler; });
+        corpo.appendChild(h('tr', {}, [
+          h('td', {}, [nome, h('div', { class:'sub', style:'font-size:.76rem;margin-top:2px', text: t.cod + (t.tipo ? ' · ' + t.tipo : '') })]),
+          h('td', {}, [h('div', { class:'marcas' }, marcas.map(function (cx) { return h('label', { class:'caixa' }, [cx, cx.dataset.sem]); }))]),
+          h('td', { style:'text-align:center' }, [avaliar]),
+          h('td', { class:'num', text: String(t.diarios) })
+        ]));
+      });
+    });
+    if (!total) corpo.appendChild(h('tr', {}, [h('td', { colspan:'4', class:'sub', text:'Nenhuma turma com esse filtro.' })]));
+  };
+
+  var busca = h('input', { type:'text', placeholder:'Procurar turma ou curso', value: FILTRO.texto });
+  busca.oninput = function () { FILTRO.texto = busca.value; pintar(); };
+  var qual = h('select', {}, [['todas', 'Todas as turmas'], ['sim', 'Só as que serão avaliadas'], ['nao', 'Só as que ficam de fora']]
+    .map(function (o) { return h('option', { value: o[0], text: o[1] }); }));
+  qual.value = FILTRO.qual;
+  qual.onchange = function () { FILTRO.qual = qual.value; pintar(); };
+
+  pintar(); atualizar();
+  tela(h('div', { class:'cartao' }, [
+    h('h2', { text:'Turmas' }),
+    h('p', { class:'sub', text:'Uma linha por turma do SUAP. Turmas com o mesmo "nome no site" aparecem juntas para o aluno. Desmarque "Avaliar" nas que ficam de fora (FIC, eletivas…).' }),
+    h('div', { class:'ferramentas' }, [busca, qual, h('span', { class:'espaco' }),
+      h('button', { class:'btn peq sec', text:'Conferir o que o aluno vê', onclick: abrirConferencia })]),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Nome no site' }), h('th', { text:'Semestres' }), h('th', { style:'text-align:center', text:'Avaliar' }), h('th', { class:'num', text:'Diários' })])]),
+      corpo])]),
+    h('div', { class:'ferramentas', style:'margin:14px 0 0;position:sticky;bottom:0;background:#fff;padding:10px 0' }, [contador, h('span', { class:'espaco' }), descartar, salvar])
+  ]));
+  atualizar();
+}
+
+/** Janela com as turmas e os docentes exatamente como o aluno vai ver no semestre. */
+function abrirConferencia() {
+  if (Object.keys(EDIT).length) { aviso('Salve as alterações das turmas antes de conferir.', true); return; }
+  var sems = semestresConhecidos();
+  if (!sems.length) { aviso('Ainda não há semestres. Envie o relatório de diários.', true); return; }
+  var corpo = h('div'), fundo = h('div', { class:'fundo-modal' });
+  var fechar = function () { fundo.remove(); document.removeEventListener('keydown', esc); };
+  var esc = function (ev) { if (ev.key === 'Escape') fechar(); };
+  var sel = h('select', {}, sems.map(function (s) { return h('option', { value: s, text: nomeSem(s) }); }));
+  sel.value = P.config.semestres[P.config.semestres.length - 1] || sems[sems.length - 1];
+  var buscar = function () {
+    corpo.innerHTML = ''; corpo.appendChild(h('div', { class:'carrega', text:'Carregando…' }));
+    chamar('conferencia', { semestre: sel.value }).then(function (r) {
+      corpo.innerHTML = '';
+      var itens = r.turmas.reduce(function (a, t) { return a + t.itens.length; }, 0);
+      corpo.appendChild(h('p', { class:'sub', text: r.turmas.length + ' turmas e ' + itens + ' docentes/disciplinas em ' + nomeSem(r.semestre) + '. Toque na turma para ver a lista.' }));
+      r.turmas.forEach(function (t) {
+        corpo.appendChild(h('details', { class:'turma' }, [
+          h('summary', {}, [t.nome, h('span', { class:'sub', style:'font-weight:400', text:'  ·  ' + t.itens.length + ' para avaliar' })]),
+          h('ul', {}, t.itens.map(function (i) { return h('li', {}, [h('b', { text: i.docente }), ' – ' + i.disc]); }))]));
+      });
+      if (!r.turmas.length) corpo.appendChild(h('p', { text:'Nenhuma turma será avaliada neste semestre.' }));
+    }).catch(function (e) { corpo.innerHTML = ''; corpo.appendChild(h('div', { class:'erro', text: textoErro(e) })); });
+  };
+  sel.onchange = buscar;
+  fundo.onclick = function (ev) { if (ev.target === fundo) fechar(); };
+  document.addEventListener('keydown', esc);
+  fundo.appendChild(h('div', { class:'modal', role:'dialog', 'aria-label':'Conferência das turmas' }, [
+    h('button', { class:'fechar', 'aria-label':'Fechar', text:'×', onclick: fechar }),
+    h('h2', { text:'O que o aluno vê' }),
+    h('div', { class:'ferramentas' }, [sel]), corpo]));
+  document.body.appendChild(fundo);
+  buscar();
+}
+
+/* ====================================================================== 4. PARTICIPAÇÃO */
+function abaParticipacao() {
+  var part = P.participacao, o = {};
+  part.porCurso.forEach(function (x) { o[x.semestre] = true; });
+  var sems = Object.keys(o).sort();
+  var atualizar = h('button', { class:'btn peq sec', text:'Atualizar' });
+  atualizar.onclick = function () { ocupado(atualizar, 'Atualizando…', chamar('painel')).then(function (r) { P = r; desenhar(); }).catch(falha); };
+  if (!sems.length) {
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Participação' }), h('p', { text:'Ainda não chegou nenhuma avaliação.' }), atualizar]));
+    return;
+  }
+  if (sems.indexOf(SEM_PART) < 0) SEM_PART = sems[sems.length - 1];
+  var sel = h('select', {}, sems.map(function (s) { return h('option', { value: s, text: nomeSem(s) }); }));
+  sel.value = SEM_PART;
+  sel.onchange = function () { SEM_PART = sel.value; abaParticipacao(); };
+
+  var cursos = part.porCurso.filter(function (x) { return x.semestre === SEM_PART; });
+  var total = cursos.reduce(function (a, x) { return a + x.envios; }, 0), ativos = cursos.reduce(function (a, x) { return a + x.ativos; }, 0);
+  var pct = function (e, a) { return a ? Math.round(100 * e / a) : null; };
+  var barra = function (p) { return p === null ? null : h('div', { class:'barra-p' }, [h('i', { style:'width:' + Math.min(100, p) + '%' })]); };
+  var linhas = [];
+  cursos.forEach(function (c) {
+    var p = pct(c.envios, c.ativos);
+    linhas.push(h('tr', { class:'grupo' }, [h('td', { text: c.curso }), h('td', { class:'num', text: String(c.envios) }),
+      h('td', { class:'num', text: c.ativos ? String(c.ativos) : '–' }), h('td', { class:'num', text: p === null ? '–' : p + '%' }), h('td', {}, [barra(p)])]));
+    part.porTurma.filter(function (t) { return t.semestre === SEM_PART && t.curso === c.curso; }).forEach(function (t) {
+      linhas.push(h('tr', {}, [h('td', { style:'padding-left:22px', text: t.turma }), h('td', { class:'num', text: String(t.envios) }), h('td'), h('td'), h('td')]));
+    });
+  });
+  var pt = pct(total, ativos);
+  tela(h('div', { class:'cartao' }, [
+    h('h2', { text:'Participação' }),
+    h('div', { class:'ferramentas' }, [sel, h('span', { class:'espaco' }), atualizar]),
+    h('div', { class:'trio', style:'margin-bottom:14px' }, [
+      h('div', {}, [h('div', { class:'numero', text: String(total) }), h('div', { class:'sub', text:'avaliações recebidas' })]),
+      pt === null ? null : h('div', {}, [h('div', { class:'numero', text: pt + '%' }), h('div', { class:'sub', text:'dos ' + ativos + ' alunos ativos desses cursos' })])]),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Curso / turma' }), h('th', { class:'num', text:'Recebidas' }), h('th', { class:'num', text:'Alunos ativos' }), h('th', { class:'num', text:'%' }), h('th')])]),
+      h('tbody', {}, linhas)])]),
+    h('p', { class:'sub', style:'margin-top:10px', text:'A porcentagem compara com os alunos ativos do curso inteiro na lista do SUAP. Cursos que ainda não receberam nenhuma avaliação não aparecem.' })
+  ]));
+}
+
+/* ====================================================================== 5. RESULTADOS */
+function abaResultados() {
+  var sems = P.semestresComResposta;
+  if (!sems.length) {
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Resultados' }), h('p', { text:'Ainda não há respostas. Os resultados e as fichas dos docentes aparecem aqui quando as avaliações chegarem.' })]));
+    return;
+  }
+  if (!RES) {
+    carregando('Calculando o resultado…');
+    chamar('resultado', { semestre: '' }).then(function (r) { RES = r; if (ABA === 'resultados') abaResultados(); })
+      .catch(function (e) { if (e && e.jaAvisado) return; tela(h('div', { class:'cartao' }, [h('h2', { text:'Resultados' }), h('div', { class:'erro', text: textoErro(e) }),
+        h('button', { class:'btn', text:'Tentar de novo', onclick: abaResultados })])); });
+    return;
+  }
+  var r = RES;
+  var sel = h('select', {}, r.semestres.map(function (s) { return h('option', { value: s, text: nomeSem(s) }); }));
+  sel.value = r.semestre;
+  var recarregar = function (sem) {
+    carregando('Calculando o resultado…');
+    chamar('resultado', { semestre: sem }).then(function (x) { RES = x; if (ABA === 'resultados') abaResultados(); }).catch(function (e) { falha(e); abaResultados(); });
+  };
+  sel.onchange = function () { recarregar(sel.value); };
+
+  var progresso = h('span', { class:'sub' });
+  var libsPdf = function () { return carregarScript('lib/jspdf.umd.min.js').then(function () { return carregarScript('lib/jszip.min.js'); }).then(function () { return carregarScript('fichas.js'); }); };
+  var todas = h('button', { class:'btn peq', text:'Baixar todas as fichas (PDF)', disabled: !r.docentes.length });
+  todas.onclick = function () {
+    ocupado(todas, 'Gerando as fichas…', libsPdf().then(function () {
+      return FICHAS.todas(r, function (i, n) { progresso.textContent = i + ' de ' + n + ' fichas'; });
+    })).then(function (x) {
+      baixar(x.zip, x.pasta + '.zip'); progresso.textContent = '';
+      aviso('Pronto: um arquivo .zip com uma ficha por docente e um PDF com todas.');
+    }).catch(function (e) { progresso.textContent = ''; falha(e); });
+  };
+  var planilha = h('button', { class:'btn peq sec', text:'Baixar planilha (Excel)', disabled: !r.docentes.length && !r.semPontuacao.length });
+  planilha.onclick = function () { ocupado(planilha, 'Montando…', carregarScript('lib/xlsx.full.min.js').then(function () { baixarPlanilha(r); })).catch(falha); };
+
+  var corpo = h('tbody');
+  r.docentes.forEach(function (d) {
+    var detalhe = null;
+    var ficha = h('button', { class:'btn peq sec', text:'Ficha' });
+    ficha.onclick = function (ev) {
+      ev.stopPropagation();
+      ocupado(ficha, '…', libsPdf().then(function () { return FICHAS.uma(r, d); })).then(function (b) { baixar(b, FICHAS.nomeArquivo(d.docente) + '.pdf'); }).catch(falha);
+    };
+    var linha = h('tr', { class:'clicavel', title:'Ver as turmas' }, [
+      h('td', {}, [h('b', { text: d.docente }), h('div', { class:'sub', style:'font-size:.78rem', text: d.id })]),
+      h('td', { class:'num', text: String(d.blocos.length) }),
+      h('td', { class:'num' }, [h('span', { class:'nota-final', text: notaBr(d.final) })]),
+      h('td', { class:'num' }, [ficha])]);
+    linha.onclick = function () {
+      if (detalhe) { detalhe.remove(); detalhe = null; return; }
+      detalhe = h('tr', { class:'detalhe' }, [h('td', { colspan:'4' }, [tabelaBlocos(r, d.blocos)])]);
+      linha.after(detalhe);
+    };
+    corpo.appendChild(linha);
+  });
+  if (!r.docentes.length) corpo.appendChild(h('tr', {}, [h('td', { colspan:'4', class:'sub', text:'Nenhum docente com pontuação ainda neste semestre.' })]));
+
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Resultados' }),
+    h('div', { class:'ferramentas' }, [sel, h('button', { class:'btn peq sec', text:'Atualizar', onclick: function () { recarregar(r.semestre); } }),
+      h('span', { class:'espaco' }), progresso, planilha, todas]),
+    h('p', { class:'sub', text: r.docentes.length + ' docentes com pontuação em ' + nomeSem(r.semestre) + '. Pontuação da turma = soma das médias das 6 perguntas ÷ 2 (máximo 30); resultado final = média das turmas. Toque no docente para ver as turmas.' }),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Docente' }), h('th', { class:'num', text:'Turmas' }), h('th', { class:'num', text:'Resultado final' }), h('th')])]),
+      corpo])])
+  ]),
+  r.semPontuacao.length ? h('div', { class:'cartao' }, [
+    h('h2', { text:'Sem pontuação' }),
+    h('p', { class:'sub', text:'Turmas em que o docente teve nota em menos de 4 das 6 perguntas (quase todos marcaram "Não se aplica"). Não entram na ficha.' }),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Docente' }), h('th', { text:'Turma' }), h('th', { text:'Disciplina' }), h('th', { class:'num', text:'Respostas' })])]),
+      h('tbody', {}, r.semPontuacao.map(function (b) { return h('tr', {}, [h('td', { text: b.docente }), h('td', { text: b.turma }), h('td', { text: b.disc }), h('td', { class:'num', text: String(b.envios) })]); }))])])
+  ]) : null]);
+}
+
+function tabelaBlocos(r, blocos) {
+  return h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+    h('thead', {}, [h('tr', {}, [h('th', { text:'Turma e disciplina' }), h('th', { class:'num', text:'Resp.' })]
+      .concat(r.perguntas.map(function (p) { return h('th', { class:'num', title: p.t, text: p.curto.slice(0, 5) + (p.curto.length > 5 ? '.' : '') }); }))
+      .concat([h('th', { class:'num', text:'Pontuação' })]))]),
+    h('tbody', {}, blocos.map(function (b) {
+      return h('tr', {}, [h('td', {}, [b.turma, h('div', { class:'sub', style:'font-size:.8rem', text: b.disc })]), h('td', { class:'num', text: String(b.envios) })]
+        .concat(b.medias.map(function (m) { return h('td', { class:'num', text: notaBr(m) }); }))
+        .concat([h('td', { class:'num' }, [h('b', { text: notaBr(b.pont) })])]));
+    }))])]);
+}
+
+/** Planilha com o resultado final por docente e o detalhe por turma. */
+function baixarPlanilha(r) {
+  var arred = function (x) { return x === null || x === undefined ? '' : Math.round(x * 100) / 100; };
+  var curtos = r.perguntas.map(function (p) { return p.curto; });
+  var final = [['Docente', 'Matrícula', 'Turmas', 'Resultado final']].concat(r.docentes.map(function (d) { return [d.docente, d.id, d.blocos.length, arred(d.final)]; }));
+  var cab = ['Docente', 'Matrícula', 'Turma', 'Disciplina', 'Respostas'].concat(curtos, ['Pontuação da turma']);
+  var porTurma = [cab];
+  r.docentes.forEach(function (d) { d.blocos.forEach(function (b) { porTurma.push([d.docente, d.id, b.turma, b.disc, b.envios].concat(b.medias.map(arred), [arred(b.pont)])); }); });
+  r.semPontuacao.forEach(function (b) { porTurma.push([b.docente, '', b.turma, b.disc, b.envios].concat(b.medias.map(arred), ['sem pontuação'])); });
+  var wb = XLSX.utils.book_new();
+  var f1 = XLSX.utils.aoa_to_sheet(final), f2 = XLSX.utils.aoa_to_sheet(porTurma);
+  f1['!cols'] = [{ wch: 42 }, { wch: 12 }, { wch: 8 }, { wch: 16 }];
+  f2['!cols'] = [{ wch: 42 }, { wch: 12 }, { wch: 34 }, { wch: 40 }, { wch: 10 }].concat(curtos.map(function () { return { wch: 13 }; }), [{ wch: 18 }]);
+  XLSX.utils.book_append_sheet(wb, f1, 'Resultado final');
+  XLSX.utils.book_append_sheet(wb, f2, 'Por turma');
+  XLSX.writeFile(wb, 'Resultado ' + r.semestre.replace('/', '_') + '.xlsx');
+}
+
+/* ====================================================================== 6. CONFIGURAÇÕES */
+function abaConfig() {
+  var c = P.config;
+  var titulo = h('input', { type:'text', value: c.titulo, maxlength:'120' });
+  var campus = h('input', { type:'text', value: c.campus, maxlength:'80', placeholder:'Ex.: Gurupi' });
+  var cidade = h('input', { type:'text', value: c.cidade, maxlength:'80', placeholder:'Ex.: Gurupi' });
+  var salvar = h('button', { class:'btn', text:'Salvar' });
+  salvar.onclick = function () {
+    ocupado(salvar, 'Salvando…', chamar('salvarConfig', { config: { titulo: titulo.value, campus: campus.value, cidade: cidade.value } }))
+      .then(function (r) { P = r; RES = null; desenhar(); aviso('Configurações salvas.'); }).catch(falha);
+  };
+
+  var atual = h('input', { type:'password', autocomplete:'current-password' });
+  var nova = h('input', { type:'password', autocomplete:'new-password' });
+  var nova2 = h('input', { type:'password', autocomplete:'new-password' });
+  var trocar = h('button', { class:'btn sec', text:'Trocar a senha' });
+  trocar.onclick = function () {
+    if (nova.value.length < 8) { aviso('A senha nova precisa ter pelo menos 8 caracteres.', true); return; }
+    if (nova.value !== nova2.value) { aviso('As duas senhas novas não são iguais.', true); return; }
+    ocupado(trocar, 'Trocando…', chamar('trocarSenha', { atual: atual.value, nova: nova.value })).then(function (r) {
+      guardarToken(r.token); atual.value = nova.value = nova2.value = ''; aviso('Senha trocada.');
+    }).catch(falha);
+  };
+
+  tela(h('div', { class:'grade' }, [
+    h('div', { class:'cartao' }, [
+      h('h2', { text:'Identificação' }),
+      h('label', { text:'Título do site' }), titulo,
+      h('label', { text:'Campus (aparece no cabeçalho das fichas)' }), campus,
+      h('label', { text:'Cidade (aparece na data das fichas)' }), cidade,
+      salvar]),
+    h('div', { class:'cartao' }, [
+      h('h2', { text:'Senha do gestor' }),
+      h('label', { text:'Senha atual' }), atual,
+      h('label', { text:'Senha nova (8 caracteres ou mais)' }), nova,
+      h('label', { text:'Repita a senha nova' }), nova2,
+      trocar,
+      h('p', { class:'sub', style:'margin-top:14px', text:'A sessão dura 8 horas. Trocar a senha derruba quem estiver com a senha antiga.' })])
+  ]));
+}
+
+iniciar();
+</script>
+</body>
+</html>
