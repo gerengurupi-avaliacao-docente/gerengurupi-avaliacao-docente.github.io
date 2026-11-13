@@ -575,7 +575,7 @@ function abaDisciplinas() {
   var palpites = todas.filter(function (d) { return d.origem === 'definir'; });
   // mesma disciplina nas turmas A e B do mesmo curso e ano: a escolha vale para as duas
   var grupoDe = {};
-  P.turmas.forEach(function (t) { grupoDe[t.cod] = t.curso + '|' + t.periodo; });
+  P.turmas.forEach(function (t) { grupoDe[t.cod] = t.tipo === 'Eletiva' ? t.cod : t.curso + '|' + t.periodo; });
   var irmas = function (d) { return todas.filter(function (x) { return x.disc === d.disc && grupoDe[x.cod] === grupoDe[d.cod]; }); };
   var contador = h('span', { class:'sub' });
   var salvar = h('button', { class:'btn peq', text:'Salvar alterações' });

@@ -22,7 +22,7 @@
 <script>
 var CFG = { perguntas: [], aberto: false, pedeNascimento: false };
 var PERGUNTAS = [];
-var E = { matricula:'', conf:'', semestres:[], sem:null, turma:null, notas:[], auto:[], pos:0 };
+var E = { matricula:'', conf:'', semestres:[], sem:null, turma:null, notas:[], auto:[], pos:0, udSel:null };
 var ROTULOS = ['', 'Péssimo', 'Muito ruim', 'Ruim', 'Fraco', 'Regular', 'Razoável', 'Bom', 'Muito bom', 'Ótimo', 'Excelente'];
 var app = document.getElementById('app');
 
@@ -93,12 +93,14 @@ function telaLogin(msgErro) {
 }
 
 /* ---------- 2. semestre letivo ---------- */
+function udPendente(s) { return !!s.ud && !s.udFeita; }
 function telaSemestres() {
   var pend = E.semestres.filter(function (s) { return !s.feita; }).length;
   var itens = E.semestres.map(function (s) {
-    if (s.feita) return h('div', { class:'opcao feita' }, [h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text:'✔ Avaliação já enviada. Obrigado!' })])]);
-    return h('button', { class:'opcao', onclick: function () { E.sem = s; telaTurmas(); } }, [
-      h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text:'Avaliação pendente — toque para responder' })]),
+    if (s.feita && !udPendente(s)) return h('div', { class:'opcao feita' }, [h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text:'✔ Avaliação já enviada. Obrigado!' })])]);
+    var det = !s.feita ? 'Avaliação pendente — toque para responder' : '✔ Avaliação da turma enviada. Falta a unidade diversificada (se você cursou uma)';
+    return h('button', { class:'opcao', onclick: function () { E.sem = s; if (s.feita) telaUD(); else telaTurmas(); } }, [
+      h('div', {}, [h('div', { class:'tit', text: nomeSem(s.semestre) }), h('div', { class:'det', text: det })]),
       h('span', { class:'seta', text:'›' })]);
   });
   tela([h('div', { class:'cartao' }, [
@@ -111,6 +113,7 @@ function sair() { avisarAoSair(false); E.matricula = ''; E.conf = ''; E.semestre
 
 /* ---------- 3. turma ---------- */
 function telaTurmas() {
+  if (E.sem.feita) { telaUD(); return; }
   var ts = E.sem.turmas, sug = ts.filter(function (t) { return t.sugerida; });
   var botoes = ts.map(function (t) {
     return h('button', { class:'opcao', onclick: function () { iniciar(t); } }, [
@@ -122,7 +125,54 @@ function telaTurmas() {
     h('h2', { text:'Qual é a sua turma?' }),
     h('p', { class:'sub', text: nomeSem(E.sem.semestre) + '. Atenção: só é possível avaliar uma turma por semestre — escolha a sua turma de verdade.' })
   ].concat(botoes)),
+  udPendente(E.sem) ? h('p', { class:'sub', style:'margin:0 4px 12px', text:'Se você cursou uma unidade diversificada (optativa), depois de enviar a avaliação da turma você poderá avaliá-la também.' }) : null,
   h('button', { class:'btn sec', text:'Voltar', onclick: telaSemestres })]);
+}
+
+/* ---------- 3b. unidade diversificada (optativa): o aluno marca a(s) que cursou ---------- */
+function telaUD(msgErro) {
+  var ud = E.sem.ud, max = ud.max || 2, marcadas = (E.udSel && E.udSel.sem === E.sem.semestre ? E.udSel.idx : []).slice();
+  var aviso = h('div', { class:'falta-msg' });
+  var seguir = h('button', { class:'btn', text:'Avaliar a unidade escolhida' });
+  var linhas = [];
+  var atualizar = function () {
+    linhas.forEach(function (l, i) {
+      var on = marcadas.indexOf(i) >= 0;
+      l.className = 'opcao' + (on ? ' on' : '');
+      l.querySelector('.caixa-ud').textContent = on ? '☑' : '☐';
+    });
+    seguir.disabled = marcadas.length < 1;
+    seguir.textContent = marcadas.length > 1 ? 'Avaliar as ' + marcadas.length + ' unidades escolhidas' : 'Avaliar a unidade escolhida';
+    aviso.textContent = marcadas.length >= max ? 'Você já marcou ' + max + ' (o máximo). Para trocar, desmarque uma.' : '';
+  };
+  ud.itens.forEach(function (it, i) {
+    var l = h('button', { class:'opcao', onclick: function () {
+      var k = marcadas.indexOf(i);
+      if (k >= 0) marcadas.splice(k, 1); else if (marcadas.length < max) marcadas.push(i);
+      atualizar();
+    } }, [
+      h('span', { class:'caixa-ud', style:'font-size:22px;margin-right:10px', text:'☐' }),
+      h('div', { style:'flex:1;text-align:left' }, [h('div', { class:'tit', text: it.disc.replace(/^UD\s*:\s*/i, '') }), h('div', { class:'det', text: it.docente })])]);
+    linhas.push(l);
+  });
+  seguir.onclick = function () {
+    var chave = marcadas.slice().sort(function (a, b) { return a - b; }).join(',');
+    if (!E.turma || !E.turma.ud || E.turma.chave !== chave || E.turma.semestre !== E.sem.semestre) {     // mesma escolha: mantém o que já respondeu
+      var idx = marcadas.slice().sort(function (a, b) { return a - b; });
+      iniciar({ nome: ud.nome, ud: true, chave: chave, semestre: E.sem.semestre, escolhidas: idx, itens: idx.map(function (i) { return ud.itens[i]; }) });
+    } else iniciar(E.turma);
+    E.udSel = { sem: E.sem.semestre, idx: marcadas.slice() };
+  };
+  tela([h('div', { class:'cartao' }, [
+    h('h2', { text:'Unidade diversificada' }),
+    h('p', { class:'sub', text: nomeSem(E.sem.semestre) + '. As unidades diversificadas são optativas: marque só ' + (max > 1 ? 'a que você cursou (ou as ' + max + ', se cursou duas)' : 'a que você cursou') + '. Se não cursou nenhuma, toque em "Não cursei".' })
+  ].concat(linhas)),
+  aviso,
+  typeof msgErro === 'string' ? h('div', { class:'erro', text: msgErro }) : null,
+  seguir,
+  h('button', { class:'btn sec', text:'Não cursei nenhuma', onclick: function () { E.sem.udFeita = true; telaSemestres(); } }),
+  h('button', { class:'btn sec', text:'Voltar', onclick: telaSemestres })]);
+  atualizar();
 }
 
 function iniciar(t) {
@@ -204,7 +254,7 @@ function telaPergunta() {
     ].concat(linhas)),
     aviso,
     h('div', { class:'linha2' }, [
-      h('button', { class:'btn sec', text:'Voltar', onclick: function () { if (q === 0) telaTurmas(); else { E.pos--; telaPergunta(); } } }), prox])
+      h('button', { class:'btn sec', text:'Voltar', onclick: function () { if (q === 0) { if (E.turma.ud) telaUD(); else telaTurmas(); } else { E.pos--; telaPergunta(); } } }), prox])
   ]);
   atualizar();
 }
@@ -223,10 +273,13 @@ function telaEnvio(msgErro) {
     enviar.disabled = true; carregando('Enviando…');
     // undefined não atravessa a rede: tudo que não for nota vira null ("não se aplica")
     var notas = E.notas.map(function (n) { return n.map(function (v) { return typeof v === 'number' ? v : null; }); });
-    servidor('enviar', { matricula: E.matricula, conf: E.conf, semestre: E.sem.semestre, turma: E.turma.nome, notas: notas }, function (r) {
+    var ud = !!E.turma.ud, corpo = { matricula: E.matricula, conf: E.conf, semestre: E.sem.semestre, turma: E.turma.nome, notas: notas };
+    if (ud) { corpo.ud = true; corpo.escolhidas = E.turma.escolhidas; }
+    servidor('enviar', corpo, function (r) {
       if (r.erro) { telaEnvio(r.erro); return; }
       avisarAoSair(false);
-      E.sem.feita = true; E.turma = null; E.notas = []; telaFim();
+      if (ud) E.sem.udFeita = true; else E.sem.feita = true;
+      E.turma = null; E.notas = []; E.fimUD = ud; telaFim();
     }, function () { telaEnvio(); });
   };
   tela([h('div', { class:'cartao' }, [
@@ -239,11 +292,14 @@ function telaEnvio(msgErro) {
 }
 
 function telaFim() {
-  var falta = E.semestres.some(function (s) { return !s.feita; });
+  var falta = E.semestres.some(function (s) { return s !== E.sem && (!s.feita || udPendente(s)); });
+  var temUD = udPendente(E.sem);
   tela([h('div', { class:'cartao ok' }, [
     h('div', { class:'check', text:'✓' }), h('h2', { text:'Avaliação enviada!' }),
-    h('p', { text:'Obrigado por participar. Suas respostas de ' + nomeSem(E.sem.semestre) + ' foram gravadas de forma anônima.' }),
-    falta ? h('button', { class:'btn', text:'Responder o outro semestre', onclick: telaSemestres }) : null,
+    h('p', { text:'Obrigado por participar. Suas respostas de ' + nomeSem(E.sem.semestre) + (E.fimUD ? ' (unidade diversificada)' : '') + ' foram gravadas de forma anônima.' }),
+    temUD ? h('p', { class:'sub', text:'Você cursou uma unidade diversificada (optativa) neste semestre? Ela é avaliada à parte.' }) : null,
+    temUD ? h('button', { class:'btn', text:'Avaliar minha unidade diversificada', onclick: telaUD }) : null,
+    falta ? h('button', { class:'btn' + (temUD ? ' sec' : ''), text:'Responder o outro semestre', onclick: telaSemestres }) : null,
     h('button', { class:'btn sec', text:'Sair', onclick: sair })
   ])]);
 }

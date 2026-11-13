@@ -44,6 +44,7 @@ button.opcao:hover, button.opcao:focus { border-color:var(--verde); outline:none
 .opcao .det { font-size:.85rem; color:var(--cinza); }
 .opcao.feita { background:var(--verde-claro); border-color:#bfe0c6; }
 .opcao .seta { margin-left:auto; font-size:1.3rem; color:var(--verde); }
+.opcao.on { background:var(--verde-claro); border-color:var(--verde); }
 .selo { display:inline-block; background:var(--verde); color:#fff; font-size:.7rem; font-weight:700; border-radius:20px; padding:2px 8px; margin-left:6px; vertical-align:middle; }
 
 /* avaliação: uma pergunta por tela */
