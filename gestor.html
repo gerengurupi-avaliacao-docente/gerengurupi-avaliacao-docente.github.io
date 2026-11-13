@@ -15,6 +15,7 @@
   <p>Área do gestor</p>
 </header>
 <nav class="abas" id="nav" hidden><div class="dentro" id="abas"></div></nav>
+<div id="versao" class="erro" style="max-width:1040px;margin:12px auto 0;width:calc(100% - 20px)" hidden></div>
 <main id="app"><div class="carrega">Carregando…</div></main>
 <div class="rodape-site"><a href="./">Página dos alunos</a></div>
 
@@ -36,7 +37,7 @@ function faltamDefinir() {
   P.turmas.forEach(function (t) { if (t.avaliar && listaSem(t.semestres).length > 1) av[t.cod] = true; });
   return (P.disciplinas || []).filter(function (d) { return av[d.cod] && d.origem === 'definir'; }).length;
 }
-var ARQ = { diarios: null, alunos: null, horario: null, erros: [] };   // relatórios escolhidos e ainda não enviados
+var ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] };   // relatórios escolhidos e ainda não enviados
 var RES = null;                 // resultado do semestre escolhido
 var SEM_PART = '';              // semestre escolhido na aba Participação
 var app = document.getElementById('app');
@@ -153,7 +154,7 @@ function abrirPainel() {
 
 function sair() {
   if ((Object.keys(EDIT).length || Object.keys(EDIT_D).length) && !confirm('Há alterações que não foram salvas. Sair assim mesmo?')) return;
-  guardarToken(''); P = null; EDIT = {}; EDIT_D = {}; RES = null; ARQ = { diarios: null, alunos: null, horario: null, erros: [] };
+  guardarToken(''); P = null; EDIT = {}; EDIT_D = {}; RES = null; ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] };
   iniciar();
 }
 
@@ -167,6 +168,10 @@ function desenhar() {
   });
   nav.appendChild(h('button', { class:'sair', text:'Sair', onclick: sair }));
   document.getElementById('nav').hidden = false;
+  // servidor do Google com o código antigo: a página nova manda dados que ele não entende
+  var vs = document.getElementById('versao');
+  vs.hidden = Array.isArray(P.disciplinas) && Array.isArray(P.horarios);
+  vs.textContent = 'O servidor do Google está com o código antigo. Abra o Apps Script da planilha, apague tudo, cole o Codigo.gs novo, salve e faça Implantar > Gerenciar implantações > lápis > Nova versão. Enquanto isso, a separação por semestre e o horário não funcionam.';
   ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, disciplinas: abaDisciplinas, participacao: abaParticipacao, resultados: abaResultados, config: abaConfig })[ABA]();
 }
 function irPara(aba) { ABA = aba; desenhar(); window.scrollTo(0, 0); }
@@ -360,7 +365,10 @@ function abaDados() {
     tela(h('div', { class:'carrega', text:'Lendo os arquivos…' }));
     carregarScript('lib/xlsx.full.min.js').then(function () {
       return Promise.all(arqs.map(function (a) {
-        return lerRelatorio(a).then(function (r) { ARQ[r.tipo] = r; }, function (e) { ARQ.erros.push(a.name + ': ' + textoErro(e) + '.'); });
+        return lerRelatorio(a).then(function (r) {
+          if (r.tipo === 'horario') ARQ.horarios[r.semestre] = r;        // um horário por semestre: o de 2026/2 não apaga o de 2026/1
+          else ARQ[r.tipo] = r;
+        }, function (e) { ARQ.erros.push(a.name + ': ' + textoErro(e) + '.'); });
       }));
     }).then(abaDados, function (e) { falha(e); abaDados(); });
   };
@@ -373,23 +381,27 @@ function abaDados() {
   if (ARQ.diarios) itens.push(h('li', { text:'Diários: ' + ARQ.diarios.nome + ' (' + ARQ.diarios.linhas + ' linhas)' }));
   if (ARQ.alunos) itens.push(h('li', { text:'Alunos: ' + ARQ.alunos.nome + ' (' + ARQ.alunos.linhas + ' matrículas' +
     (ARQ.alunos.nascimento ? ', com data de nascimento' : ', sem data de nascimento') + ')' }));
-  if (ARQ.horario) itens.push(h('li', { text:'Horário de ' + ARQ.horario.semestre + ': ' + ARQ.horario.nome + ' (' + ARQ.horario.linhas + ' aulas)' }));
+  Object.keys(ARQ.horarios).sort().forEach(function (s) {
+    var x = ARQ.horarios[s];
+    itens.push(h('li', { text:'Horário de ' + s + ': ' + x.nome + ' (' + x.linhas + ' aulas)' }));
+  });
   ARQ.erros.forEach(function (m) { itens.push(h('li', { class:'ruim', text: m })); });
 
-  var enviar = h('button', { class:'btn', text:'Enviar para o sistema', disabled: !ARQ.diarios && !ARQ.alunos && !ARQ.horario });
+  var enviar = h('button', { class:'btn', text:'Enviar para o sistema', disabled: !ARQ.diarios && !ARQ.alunos && !Object.keys(ARQ.horarios).length });
   enviar.onclick = function () {
     var corpo = {};
     if (ARQ.diarios) corpo.diarios = ARQ.diarios.tabela;
     if (ARQ.alunos) corpo.alunos = ARQ.alunos.tabela;
-    if (ARQ.horario) corpo.horario = ARQ.horario.tabela;
+    var hs = Object.keys(ARQ.horarios).sort();
+    if (hs.length) corpo.horarios = hs.map(function (s) { return ARQ.horarios[s].tabela; });
     if (corpo.diarios && P.dados.diarios && !confirm('O relatório de diários vai substituir o que está no sistema. Os ajustes feitos nas turmas e as respostas já recebidas são mantidos. Continuar?')) return;
     ocupado(enviar, 'Enviando… (pode levar um minuto)', chamar('importar', corpo)).then(function (r) {
-      P = r; RES = null; EDIT = {}; EDIT_D = {}; ARQ = { diarios: null, alunos: null, horario: null, erros: [] };
+      P = r; RES = null; EDIT = {}; EDIT_D = {}; ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] };
       desenhar(); aviso(r.mensagem || 'Dados recebidos.');
     }).catch(falha);
   };
-  var limpar = (ARQ.diarios || ARQ.alunos || ARQ.horario || ARQ.erros.length) ? h('button', { class:'btn sec', text:'Limpar a escolha', onclick: function () {
-    ARQ = { diarios: null, alunos: null, horario: null, erros: [] }; abaDados();
+  var limpar = (ARQ.diarios || ARQ.alunos || Object.keys(ARQ.horarios).length || ARQ.erros.length) ? h('button', { class:'btn sec', text:'Limpar a escolha', onclick: function () {
+    ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] }; abaDados();
   } }) : null;
 
   tela([
