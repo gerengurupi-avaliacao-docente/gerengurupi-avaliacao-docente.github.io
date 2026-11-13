@@ -29,11 +29,18 @@ var P = null;                   // painel: tudo que o servidor devolve de uma ve
 var ABA = 'inicio';
 var EDIT = {};                  // turmas alteradas e ainda não salvas: {cod: {nome, semestres, avaliar}}
 var FILTRO = { texto: '', qual: 'todas' };
-var ARQ = { diarios: null, alunos: null, erros: [] };   // relatórios escolhidos e ainda não enviados
+var EDIT_D = {};                // disciplinas alteradas e ainda não salvas: {'cod|disciplina': 'A' | '1' | '2'}
+var FILTRO_D = { turma: '', qual: 'semestrais' };
+function faltamDefinir() {
+  var av = {};
+  P.turmas.forEach(function (t) { if (t.avaliar && listaSem(t.semestres).length > 1) av[t.cod] = true; });
+  return (P.disciplinas || []).filter(function (d) { return av[d.cod] && d.origem === 'definir'; }).length;
+}
+var ARQ = { diarios: null, alunos: null, horario: null, erros: [] };   // relatórios escolhidos e ainda não enviados
 var RES = null;                 // resultado do semestre escolhido
 var SEM_PART = '';              // semestre escolhido na aba Participação
 var app = document.getElementById('app');
-var ABAS = [['inicio', 'Início'], ['dados', 'Dados do SUAP'], ['turmas', 'Turmas'], ['participacao', 'Participação'],
+var ABAS = [['inicio', 'Início'], ['dados', 'Dados do SUAP'], ['turmas', 'Turmas'], ['disciplinas', 'Disciplinas'], ['participacao', 'Participação'],
             ['resultados', 'Resultados'], ['config', 'Configurações']];
 
 try { TOKEN = sessionStorage.getItem('avaliacao_gestor') || ''; } catch (e) { /* navegador sem armazenamento: só pede a senha de novo */ }
@@ -145,8 +152,8 @@ function abrirPainel() {
 }
 
 function sair() {
-  if (Object.keys(EDIT).length && !confirm('Há alterações nas turmas que não foram salvas. Sair assim mesmo?')) return;
-  guardarToken(''); P = null; EDIT = {}; RES = null; ARQ = { diarios: null, alunos: null, erros: [] };
+  if ((Object.keys(EDIT).length || Object.keys(EDIT_D).length) && !confirm('Há alterações que não foram salvas. Sair assim mesmo?')) return;
+  guardarToken(''); P = null; EDIT = {}; EDIT_D = {}; RES = null; ARQ = { diarios: null, alunos: null, horario: null, erros: [] };
   iniciar();
 }
 
@@ -160,10 +167,10 @@ function desenhar() {
   });
   nav.appendChild(h('button', { class:'sair', text:'Sair', onclick: sair }));
   document.getElementById('nav').hidden = false;
-  ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, participacao: abaParticipacao, resultados: abaResultados, config: abaConfig })[ABA]();
+  ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, disciplinas: abaDisciplinas, participacao: abaParticipacao, resultados: abaResultados, config: abaConfig })[ABA]();
 }
 function irPara(aba) { ABA = aba; desenhar(); window.scrollTo(0, 0); }
-window.onbeforeunload = function (ev) { if (Object.keys(EDIT).length) { ev.preventDefault(); ev.returnValue = ''; return ''; } };
+window.onbeforeunload = function (ev) { if (Object.keys(EDIT).length || Object.keys(EDIT_D).length) { ev.preventDefault(); ev.returnValue = ''; return ''; } };
 
 /* ====================================================================== 1. INÍCIO */
 function abaInicio() {
@@ -239,12 +246,18 @@ function abaInicio() {
     h('ol', { class:'passo-a-passo' }, [
       h('li', { text:'Na aba Dados do SUAP, envie o relatório de diários e o relatório de alunos.' }),
       h('li', { text:'Na aba Turmas, confira os nomes, os semestres e quais turmas serão avaliadas.' }),
+      h('li', { text:'Na aba Disciplinas, confira quais disciplinas dos cursos integrados são só do 1º ou só do 2º semestre.' }),
       h('li', { text:'Volte aqui, marque os semestres e clique em Abrir a avaliação.' }),
       h('li', { text:'Divulgue o endereço ou o QR code para os alunos.' })]),
     h('button', { class:'btn', text:'Enviar os relatórios do SUAP', onclick: function () { irPara('dados'); } })
   ]) : null;
 
-  tela([guia, h('div', { class:'grade' }, [cartaoEstado, cartaoNumeros, cartaoLink])]);
+  var nDef = faltamDefinir();
+  var pendencia = nDef ? h('div', { class:'cartao' }, [
+    h('h2', { text:'Falta definir o semestre de ' + nDef + (nDef > 1 ? ' disciplinas' : ' disciplina') }),
+    h('p', { class:'sub', text:'São disciplinas semestrais dos cursos integrados. Enquanto não forem definidas, aparecem para o aluno nas avaliações dos dois semestres.' }),
+    h('button', { class:'btn peq', text:'Definir agora', onclick: function () { FILTRO_D.qual = 'conferir'; irPara('disciplinas'); } })]) : null;
+  tela([guia, pendencia, h('div', { class:'grade' }, [cartaoEstado, cartaoNumeros, cartaoLink])]);
 }
 
 /** QR code do endereço num <canvas> (8 pontos por módulo, com margem branca). */
@@ -263,7 +276,10 @@ function desenharQr(texto) {
 /* ====================================================================== 2. DADOS DO SUAP */
 // Colunas que saem do computador do gestor. O nome dos alunos nunca é enviado.
 var COLS = {
-  diarios: { exige: [['turma'], ['descricao do curso'], ['codigo do curso', 'codigo curso'], ['nivel de ensino'], ['descricao do componente'], ['professores']], extra: [] },
+  diarios: { exige: [['turma'], ['descricao do curso'], ['codigo do curso', 'codigo curso'], ['nivel de ensino'], ['descricao do componente'], ['professores']],
+             // com as etapas o sistema descobre quais disciplinas das turmas anuais são semestrais
+             extra: [['posse etapa 1'], ['posse etapa 2'], ['posse etapa 3'], ['posse etapa 4'], ['ch aula'],
+                     ['quantidade de aulas ministradas', 'qtd. aulas ministradas', 'qtd. de aulas ministradas', 'aulas ministradas']] },
   alunos:  { exige: [['matricula'], ['codigo curso', 'codigo do curso']],
              extra: [['descricao do curso'], ['situacao no curso', 'situacao'], ['data de nascimento', 'data nascimento', 'nascimento', 'dt. nascimento']] }
 };
@@ -277,10 +293,44 @@ function celula(v) {
   }
   return String(v).replace(/\s+/g, ' ').trim();
 }
-/** Lê um relatório, descobre se é o de diários ou o de alunos e separa só as colunas necessárias. */
+/** Planilha do programa de horários (lista de aulas com Professor, Turmas e Disciplina): devolve o horário ou null. */
+function lerHorario(wb, nomeArquivo) {
+  var melhor = null;
+  wb.SheetNames.forEach(function (nome) {
+    var m = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: true, defval: '' }), sem = '';
+    for (var i = 0; i < Math.min(m.length, 25); i++) {
+      var cab = m[i].map(semAcento), iT = cab.indexOf('turmas'), iD = cab.indexOf('disciplina');
+      var iA = cab.indexOf('ano letivo :') >= 0 ? cab.indexOf('ano letivo :') : cab.indexOf('ano letivo');
+      if (iA >= 0) {                                   // "Ano letivo : | 2026-1"
+        var a = m[i].slice(iA + 1).map(celula).join(' ').match(/(\d{4})\s*[-\/.]\s*([12])\b/);
+        if (a) sem = a[1] + '/' + a[2];
+      }
+      if (iT < 0 || iD < 0 || cab.indexOf('professor') < 0) continue;
+      var visto = {}, itens = [];
+      m.slice(i + 1).forEach(function (r) {
+        var t = celula(r[iT]), d = celula(r[iD]), k = t + '|' + d;
+        if (!t || !d || visto[k]) return;
+        visto[k] = true; itens.push({ turma: t, disc: d });
+      });
+      if (itens.length && (!melhor || itens.length > melhor.itens.length)) melhor = { semestre: sem, itens: itens };
+      break;
+    }
+  });
+  if (!melhor) return null;
+  if (!melhor.semestre) {                             // sem "Ano letivo" dentro: tenta o nome do arquivo ("horário 2026-1.xml")
+    var n = String(nomeArquivo).match(/(\d{4})\s*[-_.\/ ]\s*([12])\b/);
+    if (n) melhor.semestre = n[1] + '/' + n[2];
+  }
+  if (!melhor.semestre) throw new Error('é um horário, mas não consegui ver de qual semestre (ponha no nome do arquivo, por exemplo "horário 2026-1")');
+  return { tipo: 'horario', nome: nomeArquivo, linhas: melhor.itens.length, semestre: melhor.semestre, tabela: melhor };
+}
+
+/** Lê um arquivo, descobre se é o relatório de diários, o de alunos ou o horário e separa só o necessário. */
 function lerRelatorio(arquivo) {
   return arquivo.arrayBuffer().then(function (buf) {
     var wb = XLSX.read(buf, { type:'array', cellDates: true });
+    var hor = lerHorario(wb, arquivo.name);
+    if (hor) return hor;
     var m = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
     for (var i = 0; i < Math.min(m.length, 15); i++) {          // o cabeçalho pode não estar na primeira linha
       var cab = m[i].map(semAcento);
@@ -294,15 +344,15 @@ function lerRelatorio(arquivo) {
                nascimento: tipo === 'alunos' && acha(cab, COLS.alunos.extra[2]) >= 0,
                tabela: { cab: idx.map(function (j) { return celula(m[i][j]); }), linhas: linhas } };
     }
-    throw new Error('não parece ser um relatório de diários nem de alunos do SUAP (não achei as colunas esperadas)');
+    throw new Error('não parece ser um relatório de diários ou de alunos do SUAP, nem um horário (não achei as colunas esperadas)');
   });
 }
 
 function abaDados() {
-  var entrada = h('input', { type:'file', multiple: true, accept:'.xlsx,.xls,.csv,.ods' });
+  var entrada = h('input', { type:'file', multiple: true, accept:'.xlsx,.xls,.csv,.ods,.xml' });
   var zona = h('label', { class:'arquivo' }, [entrada,
     h('div', { style:'font-weight:700;font-size:1.05rem', text:'Clique para escolher os relatórios do SUAP' }),
-    h('div', { class:'sub', text:'ou arraste os arquivos para cá. Pode escolher os dois de uma vez: o sistema descobre qual é qual.' })]);
+    h('div', { class:'sub', text:'ou arraste os arquivos para cá. Pode escolher todos de uma vez (diários, alunos e horário): o sistema descobre qual é qual.' })]);
   var receber = function (lista) {
     var arqs = [].slice.call(lista || []);
     if (!arqs.length) return;
@@ -323,28 +373,31 @@ function abaDados() {
   if (ARQ.diarios) itens.push(h('li', { text:'Diários: ' + ARQ.diarios.nome + ' (' + ARQ.diarios.linhas + ' linhas)' }));
   if (ARQ.alunos) itens.push(h('li', { text:'Alunos: ' + ARQ.alunos.nome + ' (' + ARQ.alunos.linhas + ' matrículas' +
     (ARQ.alunos.nascimento ? ', com data de nascimento' : ', sem data de nascimento') + ')' }));
+  if (ARQ.horario) itens.push(h('li', { text:'Horário de ' + ARQ.horario.semestre + ': ' + ARQ.horario.nome + ' (' + ARQ.horario.linhas + ' aulas)' }));
   ARQ.erros.forEach(function (m) { itens.push(h('li', { class:'ruim', text: m })); });
 
-  var enviar = h('button', { class:'btn', text:'Enviar para o sistema', disabled: !ARQ.diarios && !ARQ.alunos });
+  var enviar = h('button', { class:'btn', text:'Enviar para o sistema', disabled: !ARQ.diarios && !ARQ.alunos && !ARQ.horario });
   enviar.onclick = function () {
     var corpo = {};
     if (ARQ.diarios) corpo.diarios = ARQ.diarios.tabela;
     if (ARQ.alunos) corpo.alunos = ARQ.alunos.tabela;
+    if (ARQ.horario) corpo.horario = ARQ.horario.tabela;
     if (corpo.diarios && P.dados.diarios && !confirm('O relatório de diários vai substituir o que está no sistema. Os ajustes feitos nas turmas e as respostas já recebidas são mantidos. Continuar?')) return;
     ocupado(enviar, 'Enviando… (pode levar um minuto)', chamar('importar', corpo)).then(function (r) {
-      P = r; RES = null; EDIT = {}; ARQ = { diarios: null, alunos: null, erros: [] };
+      P = r; RES = null; EDIT = {}; EDIT_D = {}; ARQ = { diarios: null, alunos: null, horario: null, erros: [] };
       desenhar(); aviso(r.mensagem || 'Dados recebidos.');
     }).catch(falha);
   };
-  var limpar = (ARQ.diarios || ARQ.alunos || ARQ.erros.length) ? h('button', { class:'btn sec', text:'Limpar a escolha', onclick: function () {
-    ARQ = { diarios: null, alunos: null, erros: [] }; abaDados();
+  var limpar = (ARQ.diarios || ARQ.alunos || ARQ.horario || ARQ.erros.length) ? h('button', { class:'btn sec', text:'Limpar a escolha', onclick: function () {
+    ARQ = { diarios: null, alunos: null, horario: null, erros: [] }; abaDados();
   } }) : null;
 
   tela([
     h('div', { class:'cartao' }, [
       h('h2', { text:'Relatórios do SUAP' }),
       h('p', { class:'sub', text:'No sistema agora: ' + P.dados.diarios + ' diários e ' + P.dados.alunos + ' matrículas' +
-        (P.dados.alunos ? (P.dados.pedeNascimento ? ' (com data de nascimento).' : ' (sem data de nascimento).') : '.') }),
+        (P.dados.alunos ? (P.dados.pedeNascimento ? ' (com data de nascimento).' : ' (sem data de nascimento).') : '.') +
+        ((P.horarios || []).length ? ' Horário de aulas: ' + P.horarios.join(' e ') + '.' : ' Nenhum horário de aulas enviado.') }),
       zona,
       itens.length ? h('ul', { class:'lista-arq' }, itens) : null,
       h('div', { class:'linha2' }, [limpar, enviar]),
@@ -353,9 +406,11 @@ function abaDados() {
     h('div', { class:'cartao' }, [
       h('h2', { text:'Quais relatórios?' }),
       h('h3', { text:'1. Diários' }),
-      h('p', { class:'sub', text:'Relatório de diários do período, exportado do SUAP em planilha, com as colunas: Turma, Descrição do Curso, Código do Curso, Nível de Ensino, Descrição do Componente e Professores.' }),
+      h('p', { class:'sub', text:'Relatório de diários do período, exportado do SUAP em planilha, com as colunas: Turma, Descrição do Curso, Código do Curso, Nível de Ensino, Descrição do Componente e Professores. Para separar sozinho as disciplinas semestrais dos cursos integrados, inclua também: Posse Etapa 1 a 4, CH Aula e Quantidade de Aulas Ministradas. Depois confira na aba Disciplinas.' }),
       h('h3', { text:'2. Alunos' }),
       h('p', { class:'sub', text:'Relatório de alunos com as colunas Matrícula, Código Curso e Situação no Curso. Se incluir a coluna Data de Nascimento, o site passa a pedir a data junto com a matrícula (mais seguro: só a matrícula é fácil de adivinhar).' }),
+      h('h3', { text:'3. Horário de aulas (para os cursos integrados)' }),
+      h('p', { class:'sub', text:'A planilha exportada do programa de horários (lista de aulas, com Professor, Turmas e Disciplina e o "Ano letivo: 2026-1"). Nos cursos integrados a turma é anual no SUAP; é o horário que mostra quais disciplinas semestrais são dadas no 1º e quais no 2º semestre. Basta o horário de um semestre (o que não está nele fica no outro); com os dois fica ainda mais seguro.' }),
       h('p', { class:'sub', text:'A cada semestre basta enviar os relatórios novos. Os ajustes feitos na aba Turmas e as respostas antigas continuam guardados.' })
     ])
   ]);
@@ -455,7 +510,7 @@ function abaTurmas() {
 
 /** Janela com as turmas e os docentes exatamente como o aluno vai ver no semestre. */
 function abrirConferencia() {
-  if (Object.keys(EDIT).length) { aviso('Salve as alterações das turmas antes de conferir.', true); return; }
+  if (Object.keys(EDIT).length || Object.keys(EDIT_D).length) { aviso('Salve as alterações antes de conferir.', true); return; }
   var sems = semestresConhecidos();
   if (!sems.length) { aviso('Ainda não há semestres. Envie o relatório de diários.', true); return; }
   var corpo = h('div'), fundo = h('div', { class:'fundo-modal' });
@@ -486,6 +541,118 @@ function abrirConferencia() {
     h('div', { class:'ferramentas' }, [sel]), corpo]));
   document.body.appendChild(fundo);
   buscar();
+}
+
+/* ====================================================================== 3b. DISCIPLINAS (semestrais das turmas anuais) */
+var NOME_SEM = { A: 'Ano todo', '1': '1º semestre', '2': '2º semestre' };
+function chaveD(d) { return d.cod + '|' + d.disc; }
+function semDisc(d) { var k = chaveD(d); return Object.prototype.hasOwnProperty.call(EDIT_D, k) ? EDIT_D[k] : d.sem; }
+
+function abaDisciplinas() {
+  // só interessam as turmas avaliadas em mais de um semestre (as anuais dos cursos integrados)
+  var nomeDe = {};
+  P.turmas.forEach(function (t) { if (t.avaliar && listaSem(t.semestres).length > 1) nomeDe[t.cod] = t.nome; });
+  var todas = (P.disciplinas || []).filter(function (d) { return nomeDe[d.cod]; });
+  if (!todas.length) {
+    tela(h('div', { class:'cartao' }, [h('h2', { text:'Disciplinas' }),
+      h('p', { text:'Aqui você define, nas turmas anuais (cursos integrados), quais disciplinas são só do 1º ou só do 2º semestre.' }),
+      h('p', { class:'sub', text: P.turmas.length ? 'Nenhuma turma anual em avaliação foi encontrada. Se há cursos integrados, envie de novo o relatório de diários do SUAP na aba Dados do SUAP.' : 'Envie primeiro o relatório de diários do SUAP.' }),
+      h('button', { class:'btn', text:'Ir para Dados do SUAP', onclick: function () { irPara('dados'); } })]));
+    return;
+  }
+  var palpites = todas.filter(function (d) { return d.origem === 'definir'; });
+  // mesma disciplina nas turmas A e B do mesmo curso e ano: a escolha vale para as duas
+  var grupoDe = {};
+  P.turmas.forEach(function (t) { grupoDe[t.cod] = t.curso + '|' + t.periodo; });
+  var irmas = function (d) { return todas.filter(function (x) { return x.disc === d.disc && grupoDe[x.cod] === grupoDe[d.cod]; }); };
+  var contador = h('span', { class:'sub' });
+  var salvar = h('button', { class:'btn peq', text:'Salvar alterações' });
+  var descartar = h('button', { class:'btn peq sec', text:'Descartar' });
+  var atualizar = function () {
+    var n = Object.keys(EDIT_D).length;
+    contador.textContent = n ? n + (n > 1 ? ' disciplinas alteradas' : ' disciplina alterada') + ' (ainda não salvo)' : '';
+    salvar.disabled = !n; descartar.hidden = !n;
+  };
+  var enviar = function (botao, lista, msg) {
+    ocupado(botao, 'Salvando…', chamar('salvarDisciplinas', { disciplinas: lista })).then(function (r) {
+      P = r; EDIT_D = {}; desenhar(); aviso(msg);
+    }).catch(falha);
+  };
+  salvar.onclick = function () {
+    var lista = todas.filter(function (d) { return Object.prototype.hasOwnProperty.call(EDIT_D, chaveD(d)); })
+      .map(function (d) { return { cod: d.cod, disc: d.disc, sem: EDIT_D[chaveD(d)] }; });
+    enviar(salvar, lista, 'Disciplinas salvas. O site dos alunos já está atualizado.');
+  };
+  descartar.onclick = function () { if (confirm('Descartar as alterações não salvas?')) { EDIT_D = {}; abaDisciplinas(); } };
+
+  var corpo = h('tbody');
+  var pintar = function () {
+    corpo.innerHTML = '';
+    var grupos = {}, total = 0;
+    todas.forEach(function (d) {
+      if (FILTRO_D.turma && nomeDe[d.cod] !== FILTRO_D.turma) return;
+      var mexida = Object.prototype.hasOwnProperty.call(EDIT_D, chaveD(d));
+      if (FILTRO_D.qual === 'semestrais' && d.origem === 'anual' && d.sem === 'A' && !mexida) return;
+      if (FILTRO_D.qual === 'conferir' && mexida) { /* continua na lista até salvar */ }
+      if (FILTRO_D.qual === 'conferir' && d.origem !== 'definir') return;
+      (grupos[nomeDe[d.cod]] = grupos[nomeDe[d.cod]] || []).push(d); total++;
+    });
+    Object.keys(grupos).sort(function (a, b) { return a.localeCompare(b, 'pt'); }).forEach(function (turma) {
+      corpo.appendChild(h('tr', { class:'grupo' }, [h('td', { colspan:'2', text: turma })]));
+      grupos[turma].sort(function (a, b) { return semDisc(a).localeCompare(semDisc(b)) || a.disc.localeCompare(b.disc, 'pt'); }).forEach(function (d) {
+        var botoes = ['1', '2', 'A'].map(function (s) {
+          var b = h('button', { text: NOME_SEM[s], onclick: function () {
+            irmas(d).forEach(function (x) { if (s === x.sem && x.origem !== 'definir') delete EDIT_D[chaveD(x)]; else EDIT_D[chaveD(x)] = s; });
+            pintar(); atualizar();
+          } });
+          b.dataset.sem = s;
+          return b;
+        });
+        var marcar = function () { botoes.forEach(function (b) { b.className = !pendente && b.dataset.sem === semDisc(d) ? 'on' : ''; }); };
+        var pendente = d.origem === 'definir' && !Object.prototype.hasOwnProperty.call(EDIT_D, chaveD(d));
+        var selo = pendente ? h('span', { class:'selo duvida', title:'Disciplina semestral: o SUAP não informa em qual semestre ela acontece.', text:'definir semestre' })
+          : d.origem === 'gestor' ? h('span', { class:'selo neutro', text:'definido por você' })
+          : d.origem === 'horario' ? h('span', { class:'selo neutro', title:'Conforme o horário de aulas enviado na aba Dados do SUAP.', text:'pelo horário' })
+          : d.origem === 'aulas' ? h('span', { class:'selo neutro', title:'Aulas completas = 1º semestre (já encerrado); aulas faltando = 2º semestre (em andamento).', text:'pelas aulas dadas' }) : null;
+        corpo.appendChild(h('tr', {}, [
+          h('td', {}, [h('b', { text: d.disc }), selo, h('div', { class:'sub', style:'font-size:.8rem', text: d.docentes + (d.aulas ? '  ·  ' + d.aulas + ' aulas dadas' : '') })]),
+          h('td', { class:'num' }, [h('div', { class:'seg' }, botoes)])]));
+        marcar();
+      });
+    });
+    if (!total) corpo.appendChild(h('tr', {}, [h('td', { colspan:'2', class:'sub', text: FILTRO_D.qual === 'semestrais'
+      ? 'Nenhuma disciplina semestral identificada com esse filtro. Escolha "Todas as disciplinas" para marcar à mão.' : 'Nenhuma disciplina com esse filtro.' })]));
+  };
+
+  var nomes = Object.keys(nomeDe).map(function (c) { return nomeDe[c]; }).filter(function (n, i, a) { return a.indexOf(n) === i; }).sort(function (a, b) { return a.localeCompare(b, 'pt'); });
+  if (nomes.indexOf(FILTRO_D.turma) < 0) FILTRO_D.turma = '';
+  var selT = h('select', {}, [h('option', { value:'', text:'Todas as turmas anuais' })].concat(nomes.map(function (n) { return h('option', { value: n, text: n }); })));
+  selT.value = FILTRO_D.turma;
+  selT.onchange = function () { FILTRO_D.turma = selT.value; pintar(); };
+  var selQ = h('select', {}, [['conferir', 'Só as que faltam definir'], ['semestrais', 'Só as semestrais'], ['todas', 'Todas as disciplinas']]
+    .map(function (o) { return h('option', { value: o[0], text: o[1] }); }));
+  selQ.value = FILTRO_D.qual;
+  selQ.onchange = function () { FILTRO_D.qual = selQ.value; pintar(); };
+  var confirmar = palpites.length ? h('button', { class:'btn peq sec', text:'As que faltam são do ano todo' }) : null;
+  if (confirmar) confirmar.onclick = function () {
+    if (Object.keys(EDIT_D).length) { aviso('Salve ou descarte as alterações antes.', true); return; }
+    if (!confirm('Marcar as ' + palpites.length + ' disciplinas que faltam como "Ano todo"? Elas vão aparecer nas avaliações dos dois semestres.')) return;
+    enviar(confirmar, palpites.map(function (d) { return { cod: d.cod, disc: d.disc, sem: 'A' }; }), 'Pronto: ficaram como ano todo.');
+  };
+
+  pintar();
+  tela(h('div', { class:'cartao' }, [
+    h('h2', { text:'Disciplinas das turmas anuais' }),
+    h('p', { class:'sub', text:'Nos cursos integrados a turma é anual, mas algumas disciplinas duram só um semestre. Aqui cada uma fica no seu semestre, para o aluno não avaliar no 1º semestre quem só dá aula no 2º. "Ano todo" aparece nas duas avaliações. O sistema separa sozinho: pelo horário de aulas, quando ele foi enviado (o que está no horário do 1º semestre é do 1º); senão pelo nome (Arte I e II) e pelas aulas já dadas. Confira e corrija o que precisar.' }),
+    palpites.length ? h('div', { class:'info' }, [(palpites.length > 1 ? 'Faltam ' + palpites.length + ' disciplinas semestrais' : 'Falta 1 disciplina semestral') +
+      ' sem semestre definido (selo "definir semestre"). O SUAP não informa em qual semestre elas acontecem; enquanto você não escolher, aparecem nas avaliações dos dois semestres. As que têm par no nome (Sociologia I e II, Projeto Integrador 1 e 2) já foram separadas pelo número. Nas turmas A e B do mesmo curso, a escolha vale para as duas.']) : null,
+    h('div', { class:'ferramentas' }, [selT, selQ, h('span', { class:'espaco' }), confirmar]),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Disciplina e docentes' }), h('th', { class:'num', text:'Quando acontece' })])]),
+      corpo])]),
+    h('div', { class:'ferramentas', style:'margin:14px 0 0;position:sticky;bottom:0;background:#fff;padding:10px 0' }, [contador, h('span', { class:'espaco' }), descartar, salvar])
+  ]));
+  atualizar();
 }
 
 /* ====================================================================== 4. PARTICIPAÇÃO */

@@ -111,6 +111,12 @@ table.t td.num, table.t th.num { text-align:right; white-space:nowrap; }
 table.t input[type=text] { padding:7px 9px; border-width:1px; border-radius:8px; font-size:.92rem; min-width:210px; }
 table.t input[type=checkbox] { width:20px; height:20px; accent-color:var(--verde); }
 .rolagem { overflow-x:auto; }
+.seg { display:inline-flex; border:1px solid #c9d2cc; border-radius:10px; overflow:hidden; }
+.seg button { background:#fff; color:var(--cinza); padding:8px 11px; font-size:.85rem; border-radius:0; white-space:nowrap; }
+.seg button + button { border-left:1px solid #c9d2cc; }
+.seg button.on { background:var(--verde); color:#fff; font-weight:700; }
+.selo.duvida { background:#b26a00; }
+.selo.neutro { background:#e3e9e5; color:#4b554f; }
 .barra-p { background:var(--linha); height:10px; border-radius:10px; overflow:hidden; min-width:90px; }
 .barra-p i { display:block; height:100%; background:var(--verde); border-radius:10px; }
 .ferramentas { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
