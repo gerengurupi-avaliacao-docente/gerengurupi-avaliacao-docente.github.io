@@ -826,6 +826,16 @@ function chaveNome(s) { return semAcento(String(s).replace(/[\\\/:*?"<>|]/g, '')
 function emailOk(e) { return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(String(e || '').trim()); }
 /** Nome da subpasta -> semestre: "2026_1", "2026-1", "2026.1", "20261" e "2026/1" viram "2026/1"; outro nome fica como está. */
 function semDaPasta(p) { var m = String(p).match(/(20\d\d)\s*[\/_.\- ]?\s*([12])(?!\d)/); return m ? m[1] + '/' + m[2] : String(p).trim(); }
+/** Semestre de um arquivo pelas pastas do caminho: a primeira que parece semestre (as de dentro antes da pasta escolhida);
+ *  "assinadas" e "Fichas" nunca são semestre. Assim funciona escolhendo "avaliação docente" ou direto a pasta "2025_1". */
+function semDoCaminho(pastas) {
+  var ehSem = function (x) { return SEM_RE.test(semDaPasta(x)); }, dentro = pastas.slice(1).filter(ehSem)[0];
+  if (dentro) return semDaPasta(dentro);
+  if (pastas.length && ehSem(pastas[0])) return semDaPasta(pastas[0]);
+  var outra = pastas.slice(1).concat(pastas.slice(0, 1)).filter(function (x) { return !/assinad|^fichas?$/i.test(x.trim()); })[0];
+  return outra ? outra.trim() : 'sem semestre';
+}
+var SEM_RE = /^20\d\d\/[12]$/;
 function tantos(n, um, varios) { return n + ' ' + (n === 1 ? um : varios); }
 function juntarE(l) { return l.length < 2 ? l.join('') : l.slice(0, -1).join(', ') + ' e ' + l[l.length - 1]; }
 
@@ -836,7 +846,7 @@ function lerPastaFichas(arquivos) {
     if (!/\.pdf$/i.test(f.name) || /^todas as fichas/i.test(f.name)) return;
     var partes = String(f.webkitRelativePath || f.name).split('/');
     raiz = raiz || (partes.length > 1 ? partes[0] : '');
-    var sem = semDaPasta(partes.length >= 3 ? partes[1] : partes.length === 2 ? partes[0] : 'Fichas');
+    var sem = semDoCaminho(partes.slice(0, -1));
     var naAssinadas = partes.slice(0, -1).some(function (x) { return /assinad/i.test(x); });
     var nome = f.name.replace(/\.pdf$/i, '').replace(/\s+/g, ' ').trim(), k = sem + '|' + chaveNome(nome);
     if (!achados[k] || (naAssinadas && !achados[k].naAssinadas)) achados[k] = { sem: sem, nome: nome, chave: chaveNome(nome), arquivo: f, naAssinadas: naAssinadas, assinado: false };
@@ -971,6 +981,7 @@ function abaEmails() {
   if (!EM.pdfs.length) { tela(cartaoOrigem); return; }
 
   // ---- 2. o que enviar
+  var semNome = EM.sems.filter(function (x) { return !SEM_RE.test(x); });
   var semAssinatura = EM.pdfs.filter(function (x) { return EM.marcados[x.sem] && !x.assinado; }).length;
   var semEmail = linhas.filter(function (l) { return !emailOk(l.email); }).length;
   var paraTodos = linhas.filter(function (l) { return emailOk(l.email) && l.pendentes.length; });
@@ -1060,6 +1071,7 @@ function abaEmails() {
     h('details', { class:'mensagem' }, [h('summary', { text:'Texto do e-mail' }),
       h('p', { class:'sub', text:'{docente} vira o nome do docente e {semestres} vira os semestres enviados. O texto alterado fica guardado no próximo envio.' }),
       h('label', { text:'Assunto' }), assunto, h('label', { text:'Mensagem', style:'margin-top:10px;display:block' }), texto]),
+    semNome.length ? h('div', { class:'erro', text: 'Não consegui ver de qual semestre são as fichas da pasta "' + semNome.join('", "') + '". Dê à pasta do semestre um nome como 2025_1 ou 2026_2 e escolha a pasta de novo: é esse nome que aparece no e-mail.' }) : null,
     semAssinatura ? h('div', { class:'erro', text: tantos(semAssinatura, 'ficha dos semestres marcados está', 'fichas dos semestres marcados estão') + ' sem assinatura digital. Assine antes (assinar_fichas.bat) e escolha a pasta de novo, se a ideia é enviar assinadas.' }) : null,
     semEmail ? h('p', { class:'sub', text: tantos(semEmail, 'docente com ficha na pasta ainda está', 'docentes com ficha na pasta ainda estão') + ' sem e-mail: carregue a lista ou digite o e-mail na linha do docente.' }) : null
   ]), h('div', { class:'cartao' }, [
