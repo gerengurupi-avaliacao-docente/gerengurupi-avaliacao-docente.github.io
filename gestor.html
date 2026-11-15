@@ -42,7 +42,7 @@ var RES = null;                 // resultado do semestre escolhido
 var SEM_PART = '';              // semestre escolhido na aba Participação
 var app = document.getElementById('app');
 var ABAS = [['inicio', 'Início'], ['dados', 'Dados do SUAP'], ['turmas', 'Turmas'], ['disciplinas', 'Disciplinas'], ['participacao', 'Participação'],
-            ['resultados', 'Resultados'], ['config', 'Configurações']];
+            ['resultados', 'Resultados'], ['emails', 'E-mails'], ['config', 'Configurações']];
 
 try { TOKEN = sessionStorage.getItem('avaliacao_gestor') || ''; } catch (e) { /* navegador sem armazenamento: só pede a senha de novo */ }
 function guardarToken(t) { TOKEN = t || ''; try { if (TOKEN) sessionStorage.setItem('avaliacao_gestor', TOKEN); else sessionStorage.removeItem('avaliacao_gestor'); } catch (e) {} }
@@ -154,7 +154,7 @@ function abrirPainel() {
 
 function sair() {
   if ((Object.keys(EDIT).length || Object.keys(EDIT_D).length) && !confirm('Há alterações que não foram salvas. Sair assim mesmo?')) return;
-  guardarToken(''); P = null; EDIT = {}; EDIT_D = {}; RES = null; ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] };
+  guardarToken(''); P = null; EDIT = {}; EDIT_D = {}; RES = null; EM = emVazio(); ARQ = { diarios: null, alunos: null, horarios: {}, erros: [] };
   iniciar();
 }
 
@@ -172,7 +172,7 @@ function desenhar() {
   var vs = document.getElementById('versao');
   vs.hidden = Array.isArray(P.disciplinas) && Array.isArray(P.horarios);
   vs.textContent = 'O servidor do Google está com o código antigo. Abra o Apps Script da planilha, apague tudo, cole o Codigo.gs novo, salve e faça Implantar > Gerenciar implantações > lápis > Nova versão. Enquanto isso, a separação por semestre e o horário não funcionam.';
-  ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, disciplinas: abaDisciplinas, participacao: abaParticipacao, resultados: abaResultados, config: abaConfig })[ABA]();
+  ({ inicio: abaInicio, dados: abaDados, turmas: abaTurmas, disciplinas: abaDisciplinas, participacao: abaParticipacao, resultados: abaResultados, emails: abaEmails, config: abaConfig })[ABA]();
 }
 function irPara(aba) { ABA = aba; desenhar(); window.scrollTo(0, 0); }
 window.onbeforeunload = function (ev) { if (Object.keys(EDIT).length || Object.keys(EDIT_D).length) { ev.preventDefault(); ev.returnValue = ''; return ''; } };
@@ -817,7 +817,261 @@ function baixarPlanilha(r) {
   XLSX.writeFile(wb, 'Resultado ' + r.semestre.replace('/', '_') + '.xlsx');
 }
 
-/* ====================================================================== 6. CONFIGURAÇÕES */
+/* ====================================================================== 6. E-MAILS */
+/* As fichas assinadas ficam no computador: o gestor escolhe a pasta "avaliação docente" (uma subpasta por semestre),
+ * o site liga cada PDF ao docente pelo nome do arquivo e manda um e-mail por docente, com as fichas dos semestres marcados. */
+function emVazio() { return { dados: null, pdfs: [], sems: [], marcados: {}, teste: '', filtro: 'todos', enviando: false, parar: false, progresso: '', pasta: '', assunto: null, texto: null }; }
+var EM = emVazio();
+function chaveNome(s) { return semAcento(String(s).replace(/[\\\/:*?"<>|]/g, '')); }
+function emailOk(e) { return /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(String(e || '').trim()); }
+/** Nome da subpasta -> semestre: "2026_1", "2026-1", "2026.1", "20261" e "2026/1" viram "2026/1"; outro nome fica como está. */
+function semDaPasta(p) { var m = String(p).match(/(20\d\d)\s*[\/_.\- ]?\s*([12])(?!\d)/); return m ? m[1] + '/' + m[2] : String(p).trim(); }
+function tantos(n, um, varios) { return n + ' ' + (n === 1 ? um : varios); }
+function juntarE(l) { return l.length < 2 ? l.join('') : l.slice(0, -1).join(', ') + ' e ' + l[l.length - 1]; }
+
+/** Lê a pasta escolhida: [{sem, nome, chave, arquivo, assinado}] (um PDF por docente e semestre; prefere o da subpasta "assinadas"). */
+function lerPastaFichas(arquivos) {
+  var achados = {}, raiz = '';
+  [].forEach.call(arquivos, function (f) {
+    if (!/\.pdf$/i.test(f.name) || /^todas as fichas/i.test(f.name)) return;
+    var partes = String(f.webkitRelativePath || f.name).split('/');
+    raiz = raiz || (partes.length > 1 ? partes[0] : '');
+    var sem = semDaPasta(partes.length >= 3 ? partes[1] : partes.length === 2 ? partes[0] : 'Fichas');
+    var naAssinadas = partes.slice(0, -1).some(function (x) { return /assinad/i.test(x); });
+    var nome = f.name.replace(/\.pdf$/i, '').replace(/\s+/g, ' ').trim(), k = sem + '|' + chaveNome(nome);
+    if (!achados[k] || (naAssinadas && !achados[k].naAssinadas)) achados[k] = { sem: sem, nome: nome, chave: chaveNome(nome), arquivo: f, naAssinadas: naAssinadas, assinado: false };
+  });
+  var lista = Object.keys(achados).map(function (k) { return achados[k]; });
+  // um PDF assinado digitalmente traz a marca /ByteRange
+  return lista.reduce(function (p, x) {
+    return p.then(function () { return x.arquivo.arrayBuffer(); }).then(function (buf) {
+      x.assinado = new TextDecoder('latin1').decode(buf).indexOf('/ByteRange') >= 0;
+    });
+  }, Promise.resolve()).then(function () { return { raiz: raiz, pdfs: lista }; });
+}
+
+function arquivoBase64(f) {
+  return new Promise(function (ok, erro) {
+    var r = new FileReader();
+    r.onload = function () { ok(String(r.result).split(',')[1] || ''); };
+    r.onerror = function () { erro(new Error('Não foi possível ler o arquivo ' + f.name + '.')); };
+    r.readAsDataURL(f);
+  });
+}
+
+/** Lista de e-mails em Excel/CSV: acha a coluna do nome pelo cabeçalho (ou a primeira célula com texto) e o e-mail em qualquer coluna. */
+function lerListaEmails(arquivo) {
+  return carregarScript('lib/xlsx.full.min.js').then(function () { return arquivo.arrayBuffer(); }).then(function (buf) {
+    var wb = XLSX.read(buf, { type:'array' }), out = [];
+    wb.SheetNames.forEach(function (n) {
+      var m = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, raw: false, defval: '' }), colNome = -1;
+      m.forEach(function (lin) {
+        var cel = lin.map(function (v) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); });
+        var email = cel.filter(emailOk)[0];
+        if (!email) {
+          if (colNome < 0) cel.forEach(function (v, j) { if (colNome < 0 && /^(nome|docente|professor|servidor)/.test(semAcento(v))) colNome = j; });
+          return;
+        }
+        var nome = colNome >= 0 && cel[colNome] && !emailOk(cel[colNome]) ? cel[colNome]
+                 : cel.filter(function (v) { return v && !emailOk(v) && /[A-Za-zÀ-ÿ]{2,}\s+[A-Za-zÀ-ÿ]{2,}/.test(v) && !/\d{3,}/.test(v); })[0];
+        if (nome) out.push({ nome: nome, email: email.toLowerCase() });
+      });
+    });
+    if (!out.length) throw new Error('Não achei nenhuma linha com nome e e-mail em ' + arquivo.name + '.');
+    return out;
+  });
+}
+
+/** Uma linha por docente que tem PDF na pasta: e-mail da lista, fichas por semestre e o que já foi enviado. */
+function linhasEmail() {
+  var emails = {}, nomes = {}, enviados = {}, por = {};
+  EM.dados.docentes.forEach(function (d) { emails[chaveNome(d.nome)] = d.email; nomes[chaveNome(d.nome)] = d.nome; });
+  EM.dados.envios.forEach(function (e) {
+    var k = chaveNome(e.nome); enviados[k] = enviados[k] || {};
+    e.semestres.forEach(function (s) { enviados[k][s] = e.data; });
+  });
+  EM.pdfs.forEach(function (x) {
+    var l = por[x.chave] = por[x.chave] || { chave: x.chave, nome: nomes[x.chave] || x.nome, email: emails[x.chave] || '', fichas: {}, enviados: enviados[x.chave] || {} };
+    l.fichas[x.sem] = x;
+  });
+  return Object.keys(por).map(function (k) {
+    var l = por[k];
+    l.sems = EM.sems.filter(function (s) { return EM.marcados[s] && l.fichas[s]; });                 // o que o botão "Enviar" manda
+    l.pendentes = l.sems.filter(function (s) { return !l.enviados[s]; });                              // o que "Enviar para todos" manda
+    return l;
+  }).sort(function (a, b) { return a.chave < b.chave ? -1 : 1; });
+}
+
+/** Manda um e-mail com as fichas dos semestres pedidos. */
+function enviarFichasDe(l, sems) {
+  var fichas = sems.map(function (s) { return l.fichas[s]; });
+  return Promise.all(fichas.map(function (x) { return arquivoBase64(x.arquivo); })).then(function (b64) {
+    return chamar('enviarFichas', { docente: l.nome, semestres: sems, teste: EM.teste.trim(), assunto: EM.assunto, texto: EM.texto,
+      arquivos: fichas.map(function (x, i) { return { nome: 'Avaliação Docente ' + x.sem.replace(/\//g, '-') + ' - ' + x.nome + '.pdf', dados: b64[i] }; }) });
+  }).then(function (r) {
+    EM.dados.cota = r.cota;
+    if (r.envio) EM.dados.envios.push(r.envio);
+    return r;
+  });
+}
+
+function abaEmails() {
+  if (!EM.dados) {
+    carregando('Abrindo a lista de e-mails…');
+    chamar('emails').then(function (r) { EM.dados = r; EM.assunto = r.mensagem.assunto; EM.texto = r.mensagem.texto; if (ABA === 'emails') abaEmails(); })
+      .catch(function (e) {
+        if (e && e.jaAvisado) return;
+        var antigo = /desconhecida/i.test(textoErro(e));
+        tela(h('div', { class:'cartao' }, [h('h2', { text:'Enviar fichas por e-mail' }),
+          h('div', { class:'erro', text: antigo ? 'O servidor do Google ainda está com o código antigo, sem o envio de e-mails. Siga o passo a passo do NOTAS.md (autorizar o e-mail e só depois fazer a Nova versão).' : textoErro(e) }),
+          h('button', { class:'btn', text:'Tentar de novo', onclick: abaEmails })]));
+      });
+    return;
+  }
+  var D = EM.dados, linhas = EM.pdfs.length ? linhasEmail() : [], teste = EM.teste.trim();
+
+  // ---- 1. pasta e lista
+  var pasta = h('input', { type:'file', webkitdirectory: true, multiple: true, hidden: true });
+  pasta.onchange = function () {
+    if (!pasta.files.length) return;
+    carregando('Lendo as fichas da pasta…');
+    lerPastaFichas(pasta.files).then(function (r) {
+      EM.pdfs = r.pdfs; EM.pasta = r.raiz; EM.sems = [];
+      r.pdfs.forEach(function (x) { if (EM.sems.indexOf(x.sem) < 0) EM.sems.push(x.sem); });
+      EM.sems.sort(); EM.marcados = {}; EM.sems.forEach(function (s) { EM.marcados[s] = true; });
+      abaEmails();
+      if (!r.pdfs.length) aviso('Não achei nenhum PDF de ficha nessa pasta.', true);
+    }).catch(function (e) { falha(e); abaEmails(); });
+  };
+  var lista = h('input', { type:'file', accept:'.xlsx,.xls,.csv,.ods', hidden: true });
+  lista.onchange = function () {
+    if (!lista.files.length) return;
+    carregando('Lendo a lista de e-mails…');
+    lerListaEmails(lista.files[0]).then(function (novos) {
+      var junto = {}, ordem = [];
+      D.docentes.concat(novos).forEach(function (d) { var k = chaveNome(d.nome); if (!junto[k]) ordem.push(k); junto[k] = d; });   // o arquivo novo vale mais
+      return chamar('salvarEmails', { docentes: ordem.map(function (k) { return junto[k]; }) }).then(function (r) {
+        EM.dados = Object.assign(D, { docentes: r.docentes }); abaEmails();
+        aviso(novos.length + ' e-mails lidos do arquivo. A lista agora tem ' + r.docentes.length + ' docentes.');
+      });
+    }).catch(function (e) { falha(e); abaEmails(); });
+  };
+  var nPorSem = {};
+  EM.pdfs.forEach(function (x) { nPorSem[x.sem] = (nPorSem[x.sem] || 0) + 1; });
+  var cartaoOrigem = h('div', { class:'cartao' }, [
+    h('h2', { text:'Enviar fichas por e-mail' }),
+    h('p', { class:'sub', text:'Escolha a pasta "avaliação docente" do seu computador. Dentro dela, cada semestre fica numa subpasta (por exemplo 2026_1 e 2026_2) com as fichas assinadas, um PDF por docente, com o nome do docente. As fichas não saem do seu computador até você mandar enviar.' }),
+    h('div', { class:'ferramentas' }, [
+      h('button', { class:'btn peq', text: EM.pdfs.length ? 'Trocar a pasta' : 'Escolher a pasta das fichas', disabled: EM.enviando, onclick: function () { pasta.click(); } }), pasta,
+      h('button', { class:'btn peq sec', text:'Carregar a lista de e-mails (Excel)', disabled: EM.enviando, onclick: function () { lista.click(); } }), lista,
+      h('span', { class:'espaco' }),
+      h('span', { class:'sub', text: tantos(D.docentes.length, 'docente', 'docentes') + ' com e-mail na lista. O Google ainda deixa enviar ' + D.cota + ' e-mails hoje.' })]),
+    EM.pdfs.length ? h('p', { class:'sub', text:'Pasta "' + EM.pasta + '": ' + EM.sems.map(function (s) { return s + ' (' + tantos(nPorSem[s], 'ficha', 'fichas') + ')'; }).join(', ') + '.' }) : null
+  ]);
+  if (!EM.pdfs.length) { tela(cartaoOrigem); return; }
+
+  // ---- 2. o que enviar
+  var semAssinatura = EM.pdfs.filter(function (x) { return EM.marcados[x.sem] && !x.assinado; }).length;
+  var semEmail = linhas.filter(function (l) { return !emailOk(l.email); }).length;
+  var paraTodos = linhas.filter(function (l) { return emailOk(l.email) && l.pendentes.length; });
+  var marcas = h('div', { class:'ferramentas' }, [h('b', { text:'Semestres a enviar:' })].concat(EM.sems.map(function (s) {
+    var c = h('input', { type:'checkbox', checked: !!EM.marcados[s], disabled: EM.enviando });
+    c.onchange = function () { EM.marcados[s] = c.checked; abaEmails(); };
+    return h('label', { class:'marca' }, [c, ' ' + s]);
+  })));
+  var campoTeste = h('input', { type:'text', placeholder:'seu e-mail, para testar', value: EM.teste, disabled: EM.enviando, style:'min-width:240px' });
+  campoTeste.onchange = function () { EM.teste = campoTeste.value; abaEmails(); };
+  var assunto = h('input', { type:'text', value: EM.assunto, style:'width:100%' });
+  assunto.onchange = function () { EM.assunto = assunto.value; };
+  var texto = h('textarea', { rows:'9', style:'width:100%' });
+  texto.value = EM.texto;
+  texto.onchange = function () { EM.texto = texto.value; };
+
+  var todos = h('button', { class:'btn peq', text:'Enviar para todos (' + paraTodos.length + ')', disabled: EM.enviando || !!teste || !paraTodos.length });
+  todos.onclick = function () {
+    if (paraTodos.length > D.cota && !confirm('São ' + paraTodos.length + ' e-mails e o Google só deixa enviar mais ' + D.cota + ' hoje. Os que faltarem ficam para amanhã. Continuar?')) return;
+    if (!confirm('Enviar ' + paraTodos.length + ' e-mails agora, cada docente recebendo só a própria ficha (' + juntarE(EM.sems.filter(function (s) { return EM.marcados[s]; })) + ')?'
+      + (semAssinatura ? '\n\nAtenção: ' + tantos(semAssinatura, 'ficha desses semestres está', 'fichas desses semestres estão') + ' SEM assinatura digital.' : ''))) return;
+    EM.enviando = true; EM.parar = false;
+    var feitos = 0, erros = [];
+    var proximo = function (i) {
+      if (i >= paraTodos.length || EM.parar) return Promise.resolve();
+      EM.progresso = 'Enviando ' + (i + 1) + ' de ' + paraTodos.length + ': ' + paraTodos[i].nome;
+      if (ABA === 'emails') abaEmails();
+      return enviarFichasDe(paraTodos[i], paraTodos[i].pendentes).then(function () { feitos++; }, function (e) {
+        if (e && e.jaAvisado) { EM.parar = true; return; }
+        erros.push(paraTodos[i].nome + ': ' + textoErro(e));
+        if (/hoje|internet/i.test(textoErro(e))) EM.parar = true;            // limite do dia ou sem internet: não adianta insistir
+      }).then(function () { return proximo(i + 1); });
+    };
+    proximo(0).then(function () {
+      EM.enviando = false; EM.progresso = '';
+      if (ABA === 'emails') abaEmails();
+      aviso(tantos(feitos, 'e-mail enviado', 'e-mails enviados') + '.' + (erros.length ? ' Não enviados: ' + erros.join(' | ') : ''), erros.length > 0);
+    });
+  };
+  var parar = EM.enviando ? h('button', { class:'btn peq sec', text:'Parar', onclick: function () { EM.parar = true; parar.disabled = true; parar.textContent = 'Parando…'; } }) : null;
+  var filtro = h('select', { disabled: EM.enviando }, [['todos', 'Todos'], ['pendentes', 'Falta enviar'], ['enviados', 'Já enviados'], ['semEmail', 'Sem e-mail']]
+    .map(function (o) { return h('option', { value: o[0], text: o[1] }); }));
+  filtro.value = EM.filtro;
+  filtro.onchange = function () { EM.filtro = filtro.value; abaEmails(); };
+
+  // ---- 3. docentes
+  var corpo = h('tbody');
+  linhas.filter(function (l) {
+    return EM.filtro === 'pendentes' ? l.pendentes.length > 0 : EM.filtro === 'enviados' ? l.sems.length > 0 && !l.pendentes.length
+         : EM.filtro === 'semEmail' ? !emailOk(l.email) : true;
+  }).forEach(function (l) {
+    var campo = h('input', { type:'text', value: l.email, placeholder:'e-mail do docente', disabled: EM.enviando });
+    campo.onchange = function () {
+      var v = campo.value.trim().toLowerCase();
+      if (v && !emailOk(v)) { aviso('Esse e-mail não parece válido.', true); campo.value = l.email; return; }
+      var outros = D.docentes.filter(function (d) { return chaveNome(d.nome) !== l.chave; });
+      chamar('salvarEmails', { docentes: v ? outros.concat([{ nome: l.nome, email: v }]) : outros })
+        .then(function (r) { D.docentes = r.docentes; abaEmails(); }).catch(function (e) { falha(e); campo.value = l.email; });
+    };
+    var fichas = h('td', {}, EM.sems.filter(function (s) { return l.fichas[s]; }).map(function (s) {
+      var x = l.fichas[s], on = EM.marcados[s];
+      return h('span', { class:'selo ' + (!on ? 'neutro' : l.enviados[s] ? '' : 'duvida'), style:'margin:2px 6px 2px 0',
+        title: (l.enviados[s] ? 'Enviada em ' + l.enviados[s] : 'Ainda não enviada') + (x.assinado ? '' : ' · sem assinatura digital'),
+        text: s + (l.enviados[s] ? ' ✓' : '') + (x.assinado ? '' : ' (sem assinatura)') });
+    }));
+    var datas = l.sems.filter(function (s) { return l.enviados[s]; }).map(function (s) { return l.enviados[s]; });
+    var situacao = !l.sems.length ? 'Sem ficha nos semestres marcados' : !l.pendentes.length ? 'Enviado em ' + datas[datas.length - 1]
+                 : l.pendentes.length < l.sems.length ? 'Falta ' + juntarE(l.pendentes) : 'Falta enviar';
+    var rotulo = teste ? 'Enviar teste' : l.sems.length && !l.pendentes.length ? 'Enviar de novo' : 'Enviar';
+    var botao = h('button', { class:'btn peq' + (rotulo === 'Enviar' ? '' : ' sec'), text: rotulo, disabled: EM.enviando || !l.sems.length || (!teste && !emailOk(l.email)) });
+    botao.onclick = function () {
+      if (!teste && !l.pendentes.length && !confirm(l.nome + ' já recebeu essas fichas. Enviar de novo?')) return;
+      ocupado(botao, 'Enviando…', enviarFichasDe(l, l.sems)).then(function (r) {
+        abaEmails();
+        aviso((teste ? 'Teste enviado para ' : 'Enviado para ') + r.para + ' (' + juntarE(l.sems) + ').');
+      }).catch(falha);
+    };
+    corpo.appendChild(h('tr', {}, [h('td', {}, [h('b', { text: l.nome })]), h('td', {}, [campo]), fichas, h('td', { class:'sub', text: situacao }), h('td', { class:'num' }, [botao])]));
+  });
+  if (!corpo.children.length) corpo.appendChild(h('tr', {}, [h('td', { colspan:'5', class:'sub', text:'Nenhum docente neste filtro.' })]));
+
+  tela([cartaoOrigem, h('div', { class:'cartao' }, [
+    h('h2', { text:'O que enviar' }),
+    marcas,
+    h('div', { class:'ferramentas' }, [h('b', { text:'Modo de teste:' }), campoTeste,
+      h('span', { class:'sub', text: teste ? 'Ligado: os botões "Enviar teste" mandam para ' + teste + ' e nada é registrado. Apague o e-mail para enviar de verdade.' : 'Preencha para receber você mesmo um e-mail de exemplo antes de enviar aos docentes.' })]),
+    h('details', { class:'mensagem' }, [h('summary', { text:'Texto do e-mail' }),
+      h('p', { class:'sub', text:'{docente} vira o nome do docente e {semestres} vira os semestres enviados. O texto alterado fica guardado no próximo envio.' }),
+      h('label', { text:'Assunto' }), assunto, h('label', { text:'Mensagem', style:'margin-top:10px;display:block' }), texto]),
+    semAssinatura ? h('div', { class:'erro', text: tantos(semAssinatura, 'ficha dos semestres marcados está', 'fichas dos semestres marcados estão') + ' sem assinatura digital. Assine antes (assinar_fichas.bat) e escolha a pasta de novo, se a ideia é enviar assinadas.' }) : null,
+    semEmail ? h('p', { class:'sub', text: tantos(semEmail, 'docente com ficha na pasta ainda está', 'docentes com ficha na pasta ainda estão') + ' sem e-mail: carregue a lista ou digite o e-mail na linha do docente.' }) : null
+  ]), h('div', { class:'cartao' }, [
+    h('h2', { text:'Docentes' }),
+    h('div', { class:'ferramentas' }, [filtro, h('span', { class:'sub', text: EM.progresso }), h('span', { class:'espaco' }), parar, todos]),
+    h('div', { class:'rolagem' }, [h('table', { class:'t' }, [
+      h('thead', {}, [h('tr', {}, [h('th', { text:'Docente' }), h('th', { text:'E-mail' }), h('th', { text:'Fichas na pasta' }), h('th', { text:'Situação' }), h('th')])]),
+      corpo])])
+  ])]);
+}
+
+/* ====================================================================== 7. CONFIGURAÇÕES */
 function abaConfig() {
   var c = P.config;
   var titulo = h('input', { type:'text', value: c.titulo, maxlength:'120' });

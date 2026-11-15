@@ -147,3 +147,12 @@ ol.passo-a-passo li { margin-bottom:6px; }
   .cartao { padding:14px 12px; }
   .escala button { font-size:.8rem; }
 }
+
+/* aba E-mails do gestor */
+label.marca { display:inline-flex; align-items:center; gap:6px; font-weight:600; cursor:pointer; }
+label.marca input { width:20px; height:20px; accent-color:var(--verde); }
+details.mensagem { border-top:1px solid var(--linha); padding:10px 0 4px; margin-top:4px; }
+details.mensagem summary { cursor:pointer; font-weight:700; }
+details.mensagem label { font-size:.85rem; font-weight:700; color:var(--cinza); }
+textarea { font:inherit; padding:11px 12px; border:2px solid var(--linha); border-radius:10px; background:#fff; color:var(--tinta); resize:vertical; }
+textarea:focus { outline:none; border-color:var(--verde); }
